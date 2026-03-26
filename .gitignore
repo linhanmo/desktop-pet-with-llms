@@ -8,3 +8,8 @@
 /cmake-build-release/
 /res/models/*/
 .DS_Store
+
+# Large model files
+llm/checkpoints/**/*.safetensors
+llm/checkpoints/**/*.gguf
+res/llm/**/*.gguf
