@@ -23,9 +23,13 @@ README.md
 /res/voice_deps/**
 !/res/voice_deps/.gitkeep
 # Large model files
+# llama.cpp build outputs (keep source in main)
+/llm/llama.cpp/build/**
+
 llm/checkpoints/**/*.safetensors
 llm/checkpoints/**/*.gguf
 res/llm/**/*.gguf
+
 
 
 # build files
