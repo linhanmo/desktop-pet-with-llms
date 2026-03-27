@@ -35,23 +35,24 @@
 或在资源管理器里右键 `build-msvc.zip.001` → 7-Zip → 解压。
 
 3) 运行
-- 解压完成后，直接运行 `XiaoMo.exe`
+- 解压完成后，进入 `release/` 目录，运行 `XiaoMo.exe`
 
 ## 资源与目录约定
-应用运行时查找资源的根目录为程序目录下的 `res/`。
+应用运行时查找资源的根目录为 `release/` 目录下的 `res/`。
 
 `cubism.zip` 解压后的 **Cubism SDK 放在 `sdk/` 下**（用于从源码构建或资源更新场景），不放在 `res/` 下。
 
 目录示例：
 
 ```
-XiaoMo.exe
-res/
-  bin/            # 包含 llama-cli.exe/llama.exe 等运行器（用于本地 LLM）
-  llm/            # 本地 LLM 模型（*.gguf）
-  models/         # Live2D 模型集合（每个子目录一个模型）
-  voice_deps/     # 离线语音模型与依赖（sherpa-onnx 等）
-  i18n/, icons/   # 语言与图标资源
+release/
+  XiaoMo.exe
+  res/
+    bin/            # 包含 llama-cli.exe/llama.exe 等运行器（用于本地 LLM）
+    llm/            # 本地 LLM 模型（*.gguf）
+    models/         # Live2D 模型集合（每个子目录一个模型）
+    voice_deps/     # 离线语音模型与依赖（sherpa-onnx 等）
+    i18n/, icons/   # 语言与图标资源
 sdk/
   cubism/         # Cubism SDK（由 cubism.zip 解压得到）
 ```
@@ -167,11 +168,11 @@ New-Item -ItemType Directory -Force -Path .\\res\\llm | Out-Null
 - 指定 LLM 运行器与模型（环境变量覆盖）
 
 ```powershell
-$env:LLAMA_RUNNER = \"E:\\XiaoMo\\res\\bin\\llama-cli.exe\"
-$env:LLM_MODEL    = \"E:\\XiaoMo\\res\\llm\\1.5B\\your-model.gguf\"
+$env:LLAMA_RUNNER = \"E:\\XiaoMo\\release\\res\\bin\\llama-cli.exe\"
+$env:LLM_MODEL    = \"E:\\XiaoMo\\release\\res\\llm\\1.5B\\your-model.gguf\"
 ```
 
-- llama-cli 快速自检
+- llama-cli 快速自检（在 `release/` 目录执行）
 
 ```powershell
 .\\res\\bin\\llama-cli.exe -m .\\res\\llm\\1.5B\\your-model.gguf -p \"你好\" --simple-io -n 64
