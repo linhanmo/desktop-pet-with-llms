@@ -157,31 +157,31 @@ Live2D 模型（`res/models/`）：
 - 将资源解压到正确位置（示例：在仓库 Pet 目录）
 
 ```powershell
-Expand-Archive -LiteralPath .\\assets\\cubism.zip -DestinationPath .\\sdk -Force
-Rename-Item -Path .\\sdk\\cubism* -NewName cubism -ErrorAction SilentlyContinue
-Expand-Archive -LiteralPath .\\assets\\models.zip -DestinationPath .\\res -Force
-7z x .\\assets\\voice_deps.zip.001 -o.\\res -y
-New-Item -ItemType Directory -Force -Path .\\res\\llm | Out-Null
-7z x .\\assets\\llm.zip.001 -o.\\res\\llm -y
+Expand-Archive -LiteralPath .\assets\cubism.zip -DestinationPath .\sdk -Force
+Rename-Item -Path .\sdk\cubism* -NewName cubism -ErrorAction SilentlyContinue
+Expand-Archive -LiteralPath .\assets\models.zip -DestinationPath .\res -Force
+7z x .\assets\voice_deps.zip.001 -o.\res -y
+New-Item -ItemType Directory -Force -Path .\res\llm | Out-Null
+7z x .\assets\llm.zip.001 -o.\res\llm -y
 ```
 
 - 指定 LLM 运行器与模型（环境变量覆盖）
 
 ```powershell
-$env:LLAMA_RUNNER = \"E:\\XiaoMo\\release\\res\\bin\\llama-cli.exe\"
-$env:LLM_MODEL    = \"E:\\XiaoMo\\release\\res\\llm\\1.5B\\your-model.gguf\"
+$env:LLAMA_RUNNER = "E:\XiaoMo\release\res\bin\llama-cli.exe"
+$env:LLM_MODEL    = "E:\XiaoMo\release\res\llm\1.5B\your-model.gguf"
 ```
 
 - llama-cli 快速自检（在 `release/` 目录执行）
 
 ```powershell
-.\\res\\bin\\llama-cli.exe -m .\\res\\llm\\1.5B\\your-model.gguf -p \"你好\" --simple-io -n 64
+.\res\bin\llama-cli.exe -m .\res\llm\1.5B\your-model.gguf -p "你好" --simple-io -n 64
 ```
 
 ## 配置与日志路径
-- 配置目录（Windows）：`%APPDATA%\\IAIAYN\\XiaoMo\\Configs\\config.json`
-- 本地数据目录（Windows）：`%LOCALAPPDATA%\\IAIAYN\\XiaoMo`
-- 启动日志：`%LOCALAPPDATA%\\...\\logs\\startup.log`
+- 配置目录（Windows）：`%APPDATA%\IAIAYN\XiaoMo\Configs\config.json`
+- 本地数据目录（Windows）：`%LOCALAPPDATA%\IAIAYN\XiaoMo`
+- 启动日志：`%LOCALAPPDATA%\...\logs\startup.log`
 
 ## 许可证与致谢
 - 本项目使用的第三方组件与模型版权归其各自所有者所有。Live2D 模型和语音模型请遵循其对应授权协议。
