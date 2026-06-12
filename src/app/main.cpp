@@ -48,10 +48,10 @@
 #include <QTextStream>
 #include <QMutex>
 #include <cstdlib>
-#include <cmath>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
 #include <QPermissions>
 #endif
+#include <cmath>
 
 #if defined(Q_OS_WIN32)
 #include <windows.h>
@@ -927,7 +927,7 @@ int main(int argc, char *argv[]) {
     QTranslator appTranslator;
     loadAppTranslator(app, appTranslator, SettingsManager::instance().currentLanguage());
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0) && !defined(Q_OS_WIN)
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     QMicrophonePermission micPerm;
     switch (qApp->checkPermission(micPerm)) {
     case Qt::PermissionStatus::Undetermined:
@@ -946,6 +946,7 @@ int main(int argc, char *argv[]) {
         qInfo() << "Microphone permission is already granted via Qt API.";
         break;
     }
+
 #endif
 
 #if defined(Q_OS_WIN32)

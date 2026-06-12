@@ -5,11 +5,14 @@ if(APPLE)
     enable_language(OBJCXX)
 endif()
 
-if(WIN32 AND NOT MSVC)
+option(AMAIGIRL_USE_MINGW "Enable MinGW build on Windows (experimental)" OFF)
+
+if(WIN32 AND NOT MSVC AND NOT AMAIGIRL_USE_MINGW)
     message(FATAL_ERROR
         "Windows builds currently require MSVC (Visual Studio 2022 / v143 or newer). "
         "The Live2D Cubism Core libraries used by this project are provided as MSVC import libraries, "
-        "so MinGW/GCC toolchains are not supported."
+        "so MinGW/GCC toolchains are not supported.\n"
+        "Set AMAIGIRL_USE_MINGW=ON to enable experimental MinGW support (without Live2D)."
     )
 endif()
 
@@ -298,119 +301,121 @@ if(MSVC AND (Qt6_DIR MATCHES "mingw" OR Qt6Core_DIR MATCHES "mingw"))
     )
 endif()
 
-# Live2D Cubism Core SDK
-set(CUBISM_SDK_DIR "${CMAKE_SOURCE_DIR}/sdk/cubism")
-set(CUBISM_INCLUDE_DIR "${CUBISM_SDK_DIR}/include")
+# Live2D Cubism Core SDK (skip for MinGW builds)
+if(NOT AMAIGIRL_USE_MINGW)
+    set(CUBISM_SDK_DIR "${CMAKE_SOURCE_DIR}/sdk/cubism")
+    set(CUBISM_INCLUDE_DIR "${CUBISM_SDK_DIR}/include")
 
-set(CUBISM_LIB_DIR "")
-set(CUBISM_CORE_LIB "")
-set(CUBISM_CORE_LIB_DEBUG "")
-set(CUBISM_CORE_LIB_RELEASE "")
-set(CUBISM_CORE_DLL_WINDOWS_X64 "")
+    set(CUBISM_LIB_DIR "")
+    set(CUBISM_CORE_LIB "")
+    set(CUBISM_CORE_LIB_DEBUG "")
+    set(CUBISM_CORE_LIB_RELEASE "")
+    set(CUBISM_CORE_DLL_WINDOWS_X64 "")
 
-if(APPLE)
-    set(_CUBISM_MACOS_ARM64_LIB "${CUBISM_SDK_DIR}/lib/macos/arm64/libLive2DCubismCore.a")
-    set(_CUBISM_MACOS_X64_LIB "${CUBISM_SDK_DIR}/lib/macos/x86_64/libLive2DCubismCore.a")
+    if(APPLE)
+        set(_CUBISM_MACOS_ARM64_LIB "${CUBISM_SDK_DIR}/lib/macos/arm64/libLive2DCubismCore.a")
+        set(_CUBISM_MACOS_X64_LIB "${CUBISM_SDK_DIR}/lib/macos/x86_64/libLive2DCubismCore.a")
 
-    if(CMAKE_OSX_ARCHITECTURES MATCHES "arm64" AND CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
-        find_program(LIPO_EXECUTABLE lipo)
-        set(CUBISM_LIB_DIR "${CMAKE_BINARY_DIR}/cubism")
-        set(CUBISM_CORE_LIB "${CUBISM_LIB_DIR}/libLive2DCubismCore_universal.a")
+        if(CMAKE_OSX_ARCHITECTURES MATCHES "arm64" AND CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
+            find_program(LIPO_EXECUTABLE lipo)
+            set(CUBISM_LIB_DIR "${CMAKE_BINARY_DIR}/cubism")
+            set(CUBISM_CORE_LIB "${CUBISM_LIB_DIR}/libLive2DCubismCore_universal.a")
 
-        if(NOT LIPO_EXECUTABLE)
-            message(FATAL_ERROR "lipo not found, cannot build universal Cubism library")
+            if(NOT LIPO_EXECUTABLE)
+                message(FATAL_ERROR "lipo not found, cannot build universal Cubism library")
+            endif()
+            if(NOT EXISTS "${_CUBISM_MACOS_ARM64_LIB}")
+                message(FATAL_ERROR "Cubism arm64 library not found: ${_CUBISM_MACOS_ARM64_LIB}")
+            endif()
+            if(NOT EXISTS "${_CUBISM_MACOS_X64_LIB}")
+                message(FATAL_ERROR "Cubism x86_64 library not found: ${_CUBISM_MACOS_X64_LIB}")
+            endif()
+
+            add_custom_command(
+                OUTPUT "${CUBISM_CORE_LIB}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${CUBISM_LIB_DIR}"
+                COMMAND "${LIPO_EXECUTABLE}" -create
+                        "${_CUBISM_MACOS_ARM64_LIB}"
+                        "${_CUBISM_MACOS_X64_LIB}"
+                        -output "${CUBISM_CORE_LIB}"
+                DEPENDS "${_CUBISM_MACOS_ARM64_LIB}" "${_CUBISM_MACOS_X64_LIB}"
+                COMMENT "Creating universal Cubism Core static library"
+                VERBATIM
+            )
+            add_custom_target(cubism_core_universal DEPENDS "${CUBISM_CORE_LIB}")
+        elseif(CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+            set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/arm64")
+            set(CUBISM_CORE_LIB "${_CUBISM_MACOS_ARM64_LIB}")
+        elseif(CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
+            set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/x86_64")
+            set(CUBISM_CORE_LIB "${_CUBISM_MACOS_X64_LIB}")
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+            set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/arm64")
+            set(CUBISM_CORE_LIB "${_CUBISM_MACOS_ARM64_LIB}")
+        else()
+            set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/x86_64")
+            set(CUBISM_CORE_LIB "${_CUBISM_MACOS_X64_LIB}")
         endif()
-        if(NOT EXISTS "${_CUBISM_MACOS_ARM64_LIB}")
-            message(FATAL_ERROR "Cubism arm64 library not found: ${_CUBISM_MACOS_ARM64_LIB}")
+    elseif(WIN32)
+        # Cubism Windows libs are grouped by MSVC toolset (e.g. 143)
+        set(_CUBISM_WIN_TOOLSET "143")
+        if(DEFINED MSVC_TOOLSET_VERSION AND EXISTS "${CUBISM_SDK_DIR}/lib/windows/x86_64/${MSVC_TOOLSET_VERSION}")
+            set(_CUBISM_WIN_TOOLSET "${MSVC_TOOLSET_VERSION}")
         endif()
-        if(NOT EXISTS "${_CUBISM_MACOS_X64_LIB}")
-            message(FATAL_ERROR "Cubism x86_64 library not found: ${_CUBISM_MACOS_X64_LIB}")
-        endif()
-
-        add_custom_command(
-            OUTPUT "${CUBISM_CORE_LIB}"
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${CUBISM_LIB_DIR}"
-            COMMAND "${LIPO_EXECUTABLE}" -create
-                    "${_CUBISM_MACOS_ARM64_LIB}"
-                    "${_CUBISM_MACOS_X64_LIB}"
-                    -output "${CUBISM_CORE_LIB}"
-            DEPENDS "${_CUBISM_MACOS_ARM64_LIB}" "${_CUBISM_MACOS_X64_LIB}"
-            COMMENT "Creating universal Cubism Core static library"
-            VERBATIM
+        set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/windows/x86_64/${_CUBISM_WIN_TOOLSET}")
+        set(CUBISM_CORE_LIB_RELEASE "${CUBISM_LIB_DIR}/Live2DCubismCore_MD.lib")
+        set(CUBISM_CORE_LIB_DEBUG "${CUBISM_LIB_DIR}/Live2DCubismCore_MDd.lib")
+        file(GLOB_RECURSE _CUBISM_CORE_DLL_CANDIDATES
+            "${CUBISM_SDK_DIR}/CubismSdkForNative-*/Core/dll/windows/x86_64/Live2DCubismCore.dll"
+            "${CUBISM_SDK_DIR}/Core/dll/windows/x86_64/Live2DCubismCore.dll"
         )
-        add_custom_target(cubism_core_universal DEPENDS "${CUBISM_CORE_LIB}")
-    elseif(CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
-        set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/arm64")
-        set(CUBISM_CORE_LIB "${_CUBISM_MACOS_ARM64_LIB}")
-    elseif(CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
-        set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/x86_64")
-        set(CUBISM_CORE_LIB "${_CUBISM_MACOS_X64_LIB}")
-    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
-        set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/arm64")
-        set(CUBISM_CORE_LIB "${_CUBISM_MACOS_ARM64_LIB}")
-    else()
-        set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/macos/x86_64")
-        set(CUBISM_CORE_LIB "${_CUBISM_MACOS_X64_LIB}")
+        list(LENGTH _CUBISM_CORE_DLL_CANDIDATES _CUBISM_CORE_DLL_COUNT)
+        if(_CUBISM_CORE_DLL_COUNT GREATER 0)
+            list(GET _CUBISM_CORE_DLL_CANDIDATES 0 CUBISM_CORE_DLL_WINDOWS_X64)
+        endif()
+    elseif(UNIX)
+        set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/linux/x86_64")
+        set(CUBISM_CORE_LIB "${CUBISM_LIB_DIR}/libLive2DCubismCore.a")
     endif()
-elseif(WIN32)
-    # Cubism Windows libs are grouped by MSVC toolset (e.g. 143)
-    set(_CUBISM_WIN_TOOLSET "143")
-    if(DEFINED MSVC_TOOLSET_VERSION AND EXISTS "${CUBISM_SDK_DIR}/lib/windows/x86_64/${MSVC_TOOLSET_VERSION}")
-        set(_CUBISM_WIN_TOOLSET "${MSVC_TOOLSET_VERSION}")
-    endif()
-    set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/windows/x86_64/${_CUBISM_WIN_TOOLSET}")
-    set(CUBISM_CORE_LIB_RELEASE "${CUBISM_LIB_DIR}/Live2DCubismCore_MD.lib")
-    set(CUBISM_CORE_LIB_DEBUG "${CUBISM_LIB_DIR}/Live2DCubismCore_MDd.lib")
-    file(GLOB_RECURSE _CUBISM_CORE_DLL_CANDIDATES
-        "${CUBISM_SDK_DIR}/CubismSdkForNative-*/Core/dll/windows/x86_64/Live2DCubismCore.dll"
-        "${CUBISM_SDK_DIR}/Core/dll/windows/x86_64/Live2DCubismCore.dll"
-    )
-    list(LENGTH _CUBISM_CORE_DLL_CANDIDATES _CUBISM_CORE_DLL_COUNT)
-    if(_CUBISM_CORE_DLL_COUNT GREATER 0)
-        list(GET _CUBISM_CORE_DLL_CANDIDATES 0 CUBISM_CORE_DLL_WINDOWS_X64)
-    endif()
-elseif(UNIX)
-    set(CUBISM_LIB_DIR "${CUBISM_SDK_DIR}/lib/linux/x86_64")
-    set(CUBISM_CORE_LIB "${CUBISM_LIB_DIR}/libLive2DCubismCore.a")
-endif()
 
-# Import static Cubism Core library
-add_library(Live2DCubismCore STATIC IMPORTED GLOBAL)
-if(WIN32)
-    if(EXISTS "${CUBISM_CORE_LIB_RELEASE}")
+    # Import static Cubism Core library
+    add_library(Live2DCubismCore STATIC IMPORTED GLOBAL)
+    if(WIN32)
+        if(EXISTS "${CUBISM_CORE_LIB_RELEASE}")
+            set_target_properties(Live2DCubismCore PROPERTIES
+                IMPORTED_LOCATION_RELEASE "${CUBISM_CORE_LIB_RELEASE}"
+                INTERFACE_INCLUDE_DIRECTORIES "${CUBISM_INCLUDE_DIR}"
+            )
+            if(EXISTS "${CUBISM_CORE_LIB_DEBUG}")
+                set_target_properties(Live2DCubismCore PROPERTIES
+                    IMPORTED_LOCATION_DEBUG "${CUBISM_CORE_LIB_DEBUG}"
+                )
+            else()
+                set_target_properties(Live2DCubismCore PROPERTIES
+                    IMPORTED_LOCATION_DEBUG "${CUBISM_CORE_LIB_RELEASE}"
+                )
+            endif()
+        else()
+            message(FATAL_ERROR "Cubism Core library not found for Windows: ${CUBISM_CORE_LIB_RELEASE}")
+        endif()
+    elseif(EXISTS "${CUBISM_CORE_LIB}" OR (APPLE AND TARGET cubism_core_universal))
         set_target_properties(Live2DCubismCore PROPERTIES
-            IMPORTED_LOCATION_RELEASE "${CUBISM_CORE_LIB_RELEASE}"
+            IMPORTED_LOCATION "${CUBISM_CORE_LIB}"
             INTERFACE_INCLUDE_DIRECTORIES "${CUBISM_INCLUDE_DIR}"
         )
-        if(EXISTS "${CUBISM_CORE_LIB_DEBUG}")
-            set_target_properties(Live2DCubismCore PROPERTIES
-                IMPORTED_LOCATION_DEBUG "${CUBISM_CORE_LIB_DEBUG}"
-            )
-        else()
-            set_target_properties(Live2DCubismCore PROPERTIES
-                IMPORTED_LOCATION_DEBUG "${CUBISM_CORE_LIB_RELEASE}"
-            )
+        if(APPLE AND TARGET cubism_core_universal)
+            add_dependencies(Live2DCubismCore cubism_core_universal)
         endif()
     else()
-        message(FATAL_ERROR "Cubism Core library not found for Windows: ${CUBISM_CORE_LIB_RELEASE}")
+        message(FATAL_ERROR "Cubism Core library not found for this platform. Expected in: ${CUBISM_LIB_DIR}")
     endif()
-elseif(EXISTS "${CUBISM_CORE_LIB}" OR (APPLE AND TARGET cubism_core_universal))
-    set_target_properties(Live2DCubismCore PROPERTIES
-        IMPORTED_LOCATION "${CUBISM_CORE_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${CUBISM_INCLUDE_DIR}"
-    )
-    if(APPLE AND TARGET cubism_core_universal)
-        add_dependencies(Live2DCubismCore cubism_core_universal)
-    endif()
-else()
-    message(FATAL_ERROR "Cubism Core library not found for this platform. Expected in: ${CUBISM_LIB_DIR}")
-endif()
 
     # Map unspecified multi-configs to Release to satisfy imported target requirements
     set_target_properties(Live2DCubismCore PROPERTIES
         MAP_IMPORTED_CONFIG_MINSIZEREL Release
         MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
     )
+endif() # NOT AMAIGIRL_USE_MINGW
 
 # Sources (reflect new folder layout under src/)
 set(APP_SOURCES
@@ -420,8 +425,6 @@ set(APP_SOURCES
 set(ENGINE_SOURCES
     src/engine/Renderer.hpp
     src/engine/Renderer.cpp
-    src/engine/Live2DCore.hpp
-    src/engine/Live2DCore.cpp
     src/engine/Model.hpp
     src/engine/Model.cpp
     src/engine/Motion.hpp
@@ -431,6 +434,13 @@ set(ENGINE_SOURCES
     src/engine/PhysicsEngine.hpp
     src/engine/PhysicsEngine.cpp
 )
+
+if(NOT AMAIGIRL_USE_MINGW)
+    list(APPEND ENGINE_SOURCES
+        src/engine/Live2DCore.hpp
+        src/engine/Live2DCore.cpp
+    )
+endif()
 set(UI_SOURCES
     src/ui/theme/ThemeApi.hpp
     src/ui/theme/ThemeApi.cpp
@@ -553,6 +563,10 @@ if(WIN32)
     target_compile_definitions(XiaoMo PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+if(AMAIGIRL_USE_MINGW)
+    target_compile_definitions(XiaoMo PRIVATE AMAIGIRL_USE_MINGW=1)
+endif()
+
 target_link_libraries(XiaoMo PRIVATE
     Qt6::Core
     Qt6::Gui
@@ -560,8 +574,11 @@ target_link_libraries(XiaoMo PRIVATE
     Qt6::OpenGL
     Qt6::OpenGLWidgets
     Qt6::Svg
-    Live2DCubismCore
 )
+
+if(NOT AMAIGIRL_USE_MINGW)
+    target_link_libraries(XiaoMo PRIVATE Live2DCubismCore)
+endif()
 
 target_link_libraries(XiaoMo PRIVATE Qt6::Multimedia)
 target_compile_definitions(XiaoMo PRIVATE AMAIGIRL_USE_QT_MULTIMEDIA=1)
