@@ -2,11 +2,12 @@
 
 一款基于 Qt + Live2D 的桌面宠物应用，支持本地离线 LLM 对话与离线 TTS（文字转语音），提供托盘菜单与全局快捷键，解压即用或从源码构建。
 
-Linux 版本仓库：https://github.com/linhanmo/desktop-pet-with-llms-linux
+Linux 版本仓库（暂未开发完善）：[https://github.com/linhanmo/desktop-pet-with-llms-linux ](https://github.com/linhanmo/desktop-pet-with-llms-linux)
 
-百度网盘下载（Windows 发行包镜像）：https://pan.baidu.com/s/13QY8_rEd1pWLyFOL9JsFVQ?pwd=8888
+百度网盘下载（Windows 发行包镜像）：<https://pan.baidu.com/s/13QY8_rEd1pWLyFOL9JsFVQ?pwd=8888>
 
 ## 功能概览
+
 - Live2D 看板娘：支持呼吸、眨眼、视线跟随、物理模拟（头发/衣物摆动），可设置屏幕显示、透明背景、全局置顶等。
 - 本地离线 LLM 对话：内置 llama.cpp CLI 调用，支持 1.5B/7B 规模，风格可选 Original/Universal/Anime，System Prompt 可自定义。
 - 离线 TTS 播报：接入本地 `Qwen3-TTS` Python 后端，Qt 侧负责流程与播放，Python 侧负责推理与 wav 生成。
@@ -18,11 +19,13 @@ Linux 版本仓库：https://github.com/linhanmo/desktop-pet-with-llms-linux
 - 多语言与主题：支持简体中文、英文与主题切换；配置与对话历史持久化存储。
 
 ## 环境要求（运行）
+
 - Windows 10/11（x64）
 - 建议安装 7-Zip（用于解压 build-msvc 分卷）
 - 若启用本地 Qwen3-TTS，建议准备 NVIDIA GPU；CPU 也可运行，但速度会明显更慢
 
 ## 环境要求（从源码构建）
+
 - Git、CMake、Visual Studio 2022 Build Tools（含 VC 工具链）
 - Miniconda（用于获取 Qt6）：建议创建 qt6env 并安装 qt6-main、ninja
 - Windows PowerShell + winget（可选）：用于安装缺失依赖
@@ -30,12 +33,15 @@ Linux 版本仓库：https://github.com/linhanmo/desktop-pet-with-llms-linux
 - 建议额外准备独立虚拟环境 `.venv-qwen3-tts`，并安装 `qwen-tts`、`soundfile`
 
 ## 下载与运行（解压即用）
+
 本项目采用 **build-msvc.zip 分卷**发布：下载后解压即可运行。
 
-1) 下载
-- 下载 Release 中的 `build-msvc.zip.001` ~ `build-msvc.zip.012`（必须全部下载到同一目录）
+1. 下载
 
-2) 解压
+- 下载 Release 中的 `build-msvc.zip.001` \~ `build-msvc.zip.012`（必须全部下载到同一目录）
+
+1. 解压
+
 - 安装 7-Zip（推荐）后，在该目录执行：
 
 ```cmd
@@ -44,13 +50,15 @@ Linux 版本仓库：https://github.com/linhanmo/desktop-pet-with-llms-linux
 
 或在资源管理器里右键 `build-msvc.zip.001` → 7-Zip → 解压。
 
-3) 运行
+1. 运行
+
 - 解压完成后，进入 `release/` 目录，运行 `XiaoMo.exe`
 
 ## 资源与目录约定
+
 应用运行时查找资源的根目录为 `release/` 目录下的 `res/`。
 
-`cubism.zip` 解压后的 **Cubism SDK 放在 `sdk/` 下**（用于从源码构建或资源更新场景），不放在 `res/` 下。
+`cubism.zip` 解压后的 **Cubism SDK 放在** **`sdk/`** **下**（用于从源码构建或资源更新场景），不放在 `res/` 下。
 
 目录示例：
 
@@ -68,11 +76,13 @@ sdk/
 ```
 
 Live2D 模型（`res/models/`）：
+
 - 每个模型放在独立文件夹，如 `res/models/<模型名>/`
 - 模型文件优先匹配 `*.model3.json`，若无则尝试 `*.model.json`，否则回退 `model3.json/model.json/index.json`
 - 默认模型根目录（设置中可改）：`文档\\XiaoMo\\Models`，首次运行会自动使用其中的第一个模型
 
 本地 LLM 模型（`res/llm/`）：
+
 - 将 gguf 文件放入 `res/llm/1.5B/` 或 `res/llm/7B/`（可不分文件夹，程序会自动匹配）
 - 风格匹配规则（文件名包含以下关键字之一将优先选择）：
   - Anime：包含 `anime` 或 `anime.q`
@@ -83,6 +93,7 @@ Live2D 模型（`res/models/`）：
   - `LLM_MODEL` 指定 gguf 模型文件路径
 
 离线 TTS（`res/voice_deps/`）：
+
 - 当前默认 TTS 后端为 `res/voice_deps/qwen3-tts/`
 - Python 后端脚本路径：`res/voice_deps/qwen3-tts/backend/qwen3_tts_backend.py`
 - Base 模型默认参考音频：`res/voice_deps/qwen3-tts/prompt/default_reference.mp3`
@@ -99,6 +110,7 @@ Live2D 模型（`res/models/`）：
   - `XIAOMO_QWEN_TTS_PYTHON`
 
 ## 快捷键与托盘
+
 - Ctrl+T：显示/隐藏聊天窗口
 - Ctrl+H：显示/隐藏桌宠窗口
 - Ctrl+S：打开设置窗口
@@ -106,19 +118,23 @@ Live2D 模型（`res/models/`）：
 - 托盘图标：右键菜单可快速打开聊天、设置、退出；切换显示/隐藏状态
 
 ## 使用指南（设置窗口）
+
 设置窗口分“基础设置 / 模型设置 / AI 设置 / 高级设置”四个页签：
 
-1) 基础设置
+1. 基础设置
+
 - 主题与语言：切换应用主题与显示语言
 - 窗口行为：全局置顶、透明背景、鼠标穿透（穿透开启后需 Alt+Tab 切回再关闭）
 - 输出气泡：选择角色旁边对话气泡样式（如 爱心/漫画）
 
-2) 模型设置（Live2D）
+1. 模型设置（Live2D）
+
 - 模型选择：从默认模型根目录中选择不同模型；可一键打开当前模型所在目录
 - 去除水印：为当前模型选择一个 `*.exp3.json` 表达式文件作为“水印表达式”，以便覆盖并去除水印效果（可随时取消）
 - 动作与效果：开关“自动呼吸/自动眨眼/视线跟踪/物理模拟”
 
-3) AI 设置（对话与语音）
+1. AI 设置（对话与语音）
+
 - 角色名称：会替换 System Prompt 中的 `$name$` 变量
 - 上下文条数：参与本地 LLM 对话的历史消息条数（建议 1.5B≈12，7B≈24）
 - 最大生成长度：单次生成的最大 token 数（建议 1.5B≈192，7B≈384）
@@ -131,38 +147,46 @@ Live2D 模型（`res/models/`）：
 - STT：用于把语音转成文字；可与 KWS 联动，也可单独开启
 - VAD：用于检测说话起止，避免长时间静音也持续送入识别
 
-4) 高级设置
+1. 高级设置
+
 - 抗锯齿 MSAA：调节渲染采样（2x/4x/8x）
 - 模型显示屏幕：多屏环境可指定显示屏
 - 定时任务：支持每天固定时间或按间隔触发的本地提醒
 
 ## 从源码构建（手动步骤概览）
+
 参考以下手动流程（简版）：
 
-1) 获取依赖
+1. 获取依赖
+
 - 安装 Git、CMake、VS 2022 Build Tools（含 VC 工具链）
 - 安装 Miniconda 并创建环境：`conda create -y -n qt6env -c conda-forge qt6-main ninja`
 
-2) 拉取与配置
+1. 拉取与配置
+
 - 克隆仓库：`git clone https://github.com/linhanmo/desktop-pet-with-llms.git`
 - 准备 Qt6：找到 `Qt6_DIR` 与 `CMAKE_PREFIX_PATH`（通常在 `envs/qt6env/Library/lib/cmake/Qt6` 与 `envs/qt6env/Library`）
 
-3) CMake 构建
+1. CMake 构建
+
 - 生成：`cmake -S Pet -B Pet/build -G "Visual Studio 17 2022" -A x64 -DQt6_DIR=... -DCMAKE_PREFIX_PATH=...`
 - 编译：`cmake --build Pet/build --config Release -j 8`
 - 部署：使用 `windeployqt6.exe` 收集运行所需 DLL 到可执行目录
 
-4) 放置资源
+1. 放置资源
+
 - `cubism.zip` 解压到 `Pet/sdk/` 下，确保最终为 `Pet/sdk/cubism/`
 - `models.zip`、`voice_deps.zip.*`、`llm.zip.*` 解压/放置到 `Pet/res/` 下（详见“资源与目录约定”）
 - 若启用 Qwen3-TTS，本地 Python 环境建议位于 `Pet/.venv-qwen3-tts/`
 
-5) 准备 Qwen3-TTS Python 环境（可选但推荐）
+1. 准备 Qwen3-TTS Python 环境（可选但推荐）
+
 - 创建虚拟环境：`python -m venv .venv-qwen3-tts`
 - 安装依赖：`.\.venv-qwen3-tts\Scripts\python.exe -m pip install qwen-tts soundfile`
 - 如果 `python` 不是你想要的解释器，可通过环境变量 `XIAOMO_QWEN_TTS_PYTHON` 显式指定
 
 ## 常见问题
+
 - 运行后无对话/回复很短
   - 确认 `res/bin` 中存在 `llama-cli.exe/llama.exe`，并在“AI 设置”中选择合适规模与风格
   - 放入匹配的 gguf 模型至 `res/llm/1.5B` 或 `res/llm/7B`；或设置环境变量 `LLM_MODEL` 指定路径
@@ -190,6 +214,7 @@ Live2D 模型（`res/models/`）：
   - 确认所有分卷已完整下载并位于同一目录；用 7-Zip 从 `.001` 开始解压
 
 ## 示例命令（速查）
+
 - 解压 build-msvc 分卷
 
 ```cmd
@@ -258,14 +283,17 @@ $env:LLM_MODEL    = "E:\XiaoMo\release\res\llm\1.5B\your-model.gguf"
 ```
 
 ## 配置与日志路径
+
 - 配置目录（Windows）：`%APPDATA%\IAIAYN\XiaoMo\Configs\config.json`
 - 本地数据目录（Windows）：`%LOCALAPPDATA%\IAIAYN\XiaoMo`
 - 启动日志：`%LOCALAPPDATA%\...\logs\startup.log`
 
 ## 许可证与致谢
+
 - 本项目使用的第三方组件与模型版权归其各自所有者所有。Live2D 模型和语音模型请遵循其对应授权协议。
 
 ## 开发者信息与测试人员致谢
+
 - 开发者：Mo
 - 测试人员：guos7898-alt , xpresent-10
 
