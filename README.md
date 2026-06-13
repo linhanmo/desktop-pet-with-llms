@@ -1,4 +1,4 @@
-# XiaoMo 桌面宠物（离线本地 LLM + 语音合成）
+# XiaoMo 桌面宠物（离线本地 LLM + Qwen3-TTS 语音合成）
 
 一款基于 Qt + Live2D 的桌面宠物应用，支持本地离线 LLM 对话与离线 TTS（文字转语音），提供托盘菜单与全局快捷键，解压即用或从源码构建。
 
@@ -9,19 +9,25 @@ Linux 版本仓库：https://github.com/linhanmo/desktop-pet-with-llms-linux
 ## 功能概览
 - Live2D 看板娘：支持呼吸、眨眼、视线跟随、物理模拟（头发/衣物摆动），可设置屏幕显示、透明背景、全局置顶等。
 - 本地离线 LLM 对话：内置 llama.cpp CLI 调用，支持 1.5B/7B 规模，风格可选 Original/Universal/Anime，System Prompt 可自定义。
-- 离线 TTS 播报：集成 sherpa-onnx 生态的多种离线语音模型，支持多说话人（sid）、音量调节。
+- 离线 TTS 播报：接入本地 `Qwen3-TTS` Python 后端，Qt 侧负责流程与播放，Python 侧负责推理与 wav 生成。
+- 语音交互链路：支持 `KWS` 唤醒词检测、`STT` 语音识别、`VAD` 语音活动检测；可在唤醒后直接把语音转成文字并发送给本地 LLM。
 - 对话与气泡：角色旁显示对话气泡，支持不同气泡主题；聊天窗口支持清空历史、上下文条数与最大生成长度可调。
+- 双对话模式：支持完整历史对话窗口，也支持更轻量的“单输入框”快速输入窗口，可在两种模式之间随时切换。
+- 实时语音草稿：启用 STT 后，可在聊天窗口或单输入框中实时看到语音转文字草稿，便于边说边确认输入内容。
 - 本地提醒：内置定时任务（每天固定时间或按间隔）弹出提示并可驱动动作组。
 - 多语言与主题：支持简体中文、英文与主题切换；配置与对话历史持久化存储。
 
 ## 环境要求（运行）
 - Windows 10/11（x64）
 - 建议安装 7-Zip（用于解压 build-msvc 分卷）
+- 若启用本地 Qwen3-TTS，建议准备 NVIDIA GPU；CPU 也可运行，但速度会明显更慢
 
 ## 环境要求（从源码构建）
 - Git、CMake、Visual Studio 2022 Build Tools（含 VC 工具链）
 - Miniconda（用于获取 Qt6）：建议创建 qt6env 并安装 qt6-main、ninja
 - Windows PowerShell + winget（可选）：用于安装缺失依赖
+- Python 3.10+（用于本地 Qwen3-TTS 后端）
+- 建议额外准备独立虚拟环境 `.venv-qwen3-tts`，并安装 `qwen-tts`、`soundfile`
 
 ## 下载与运行（解压即用）
 本项目采用 **build-msvc.zip 分卷**发布：下载后解压即可运行。
@@ -55,7 +61,7 @@ release/
     bin/            # 包含 llama-cli.exe/llama.exe 等运行器（用于本地 LLM）
     llm/            # 本地 LLM 模型（*.gguf）
     models/         # Live2D 模型集合（每个子目录一个模型）
-    voice_deps/     # 离线语音模型与依赖（sherpa-onnx 等）
+    voice_deps/     # 离线语音模型与依赖（Qwen3-TTS、sherpa-onnx STT/KWS/VAD 等）
     i18n/, icons/   # 语言与图标资源
 sdk/
   cubism/         # Cubism SDK（由 cubism.zip 解压得到）
@@ -77,14 +83,26 @@ Live2D 模型（`res/models/`）：
   - `LLM_MODEL` 指定 gguf 模型文件路径
 
 离线 TTS（`res/voice_deps/`）：
-- 语音模型目录：`res/voice_deps/models/<模型名>/`，程序会自动列出可用模型
-- 多说话人（sid）：若模型包含说话人映射（speaker_id_map 或 speakers.txt），可在“AI 设置”里调节 sid
-- sherpa-onnx 可执行目录自动检测于 `res/voice_deps/sherpa-onnx-*/bin`
+- 当前默认 TTS 后端为 `res/voice_deps/qwen3-tts/`
+- Python 后端脚本路径：`res/voice_deps/qwen3-tts/backend/qwen3_tts_backend.py`
+- Base 模型默认参考音频：`res/voice_deps/qwen3-tts/prompt/default_reference.mp3`
+- 程序会自动优先探测以下模型目录之一：
+  - `Qwen3-TTS-12Hz-1.7B-CustomVoice`
+  - `Qwen3-TTS-12Hz-0.6B-CustomVoice`
+  - `Qwen3-TTS-12Hz-1.7B-VoiceDesign`
+  - `Qwen3-TTS-12Hz-1.7B-Base`
+  - `Qwen3-TTS-12Hz-0.6B-Base`
+  - `qwen3-tts`
+- 若当前加载的是 `Base` 模型，则必须提供参考音频；程序会优先使用 `prompt/default_reference.mp3`
+- STT / 唤醒词 / VAD 仍使用 `res/voice_deps/sherpa-onnx-*` 与相关依赖
+- 支持环境变量覆盖 Python 解释器：
+  - `XIAOMO_QWEN_TTS_PYTHON`
 
 ## 快捷键与托盘
 - Ctrl+T：显示/隐藏聊天窗口
 - Ctrl+H：显示/隐藏桌宠窗口
 - Ctrl+S：打开设置窗口
+- 聊天窗口与单输入框支持一键切换，语音唤醒后会按当前“对话交互模式”自动弹出对应界面
 - 托盘图标：右键菜单可快速打开聊天、设置、退出；切换显示/隐藏状态
 
 ## 使用指南（设置窗口）
@@ -106,7 +124,12 @@ Live2D 模型（`res/models/`）：
 - 最大生成长度：单次生成的最大 token 数（建议 1.5B≈192，7B≈384）
 - 对话人设（System Prompt）：自定义角色语气与边界，支持 `$name$` 变量
 - LLM 规模与风格：选择 1.5B/7B 以及 Original/Universal/Anime
-- 离线 TTS：启用后自动朗读 AI 最终回复；可选择 TTS 模型、设定说话人 sid 与音量
+- 对话交互模式：支持“历史对话窗口”和“单输入框”两种模式；后者更适合快速输入和语音唤醒场景
+- 单输入框样式：支持 `floating / dock / hud` 等展示方式，可根据桌面布局选择更顺手的交互形态
+- 离线 TTS：启用后自动朗读 AI 最终回复；当前默认接入本地 `Qwen3-TTS` 后端，可调节音量
+- KWS：用于持续监听唤醒词，检测到后自动进入后续语音交互流程
+- STT：用于把语音转成文字；可与 KWS 联动，也可单独开启
+- VAD：用于检测说话起止，避免长时间静音也持续送入识别
 
 4) 高级设置
 - 抗锯齿 MSAA：调节渲染采样（2x/4x/8x）
@@ -132,14 +155,37 @@ Live2D 模型（`res/models/`）：
 4) 放置资源
 - `cubism.zip` 解压到 `Pet/sdk/` 下，确保最终为 `Pet/sdk/cubism/`
 - `models.zip`、`voice_deps.zip.*`、`llm.zip.*` 解压/放置到 `Pet/res/` 下（详见“资源与目录约定”）
+- 若启用 Qwen3-TTS，本地 Python 环境建议位于 `Pet/.venv-qwen3-tts/`
+
+5) 准备 Qwen3-TTS Python 环境（可选但推荐）
+- 创建虚拟环境：`python -m venv .venv-qwen3-tts`
+- 安装依赖：`.\.venv-qwen3-tts\Scripts\python.exe -m pip install qwen-tts soundfile`
+- 如果 `python` 不是你想要的解释器，可通过环境变量 `XIAOMO_QWEN_TTS_PYTHON` 显式指定
 
 ## 常见问题
 - 运行后无对话/回复很短
   - 确认 `res/bin` 中存在 `llama-cli.exe/llama.exe`，并在“AI 设置”中选择合适规模与风格
   - 放入匹配的 gguf 模型至 `res/llm/1.5B` 或 `res/llm/7B`；或设置环境变量 `LLM_MODEL` 指定路径
-- 无法发声/无可选 TTS 模型
-  - 确认 `res/voice_deps/models` 下存在模型子目录，且包含模型/配置文件；启用“离线 TTS”
-  - 多说话人模型需正确的说话人映射文件（如 speakers.txt 或 JSON 映射）
+- 无法发声/离线 TTS 不可用
+  - 确认 `res/voice_deps/qwen3-tts` 或 `Qwen3-TTS-*` 模型目录存在，且包含完整模型文件
+  - 确认 `.venv-qwen3-tts` 已创建，并安装 `qwen-tts` 与 `soundfile`
+  - Base 模型请确认 `res/voice_deps/qwen3-tts/prompt/default_reference.mp3` 存在
+  - 如需强制指定解释器，可设置环境变量 `XIAOMO_QWEN_TTS_PYTHON`
+- 唤醒词或语音识别没有反应
+  - 确认“AI 设置”里已经开启 `KWS` 或 `STT`
+  - 确认 `res/voice_deps/` 下的 `sherpa-onnx-*`、`silero-vad`、`sensevoice-small` 等语音依赖存在
+  - 首次运行请确认系统已授予麦克风权限
+  - `KWS + STT` 同时开启时，会先等待唤醒，再开始识别；若只开 `STT`，则会直接进入语音检测与识别
+- TTS 可以生成和播放，但速度太慢
+  - 当前版本已经改为常驻 `Qwen3-TTS` 后端，后续多次播报会比逐次重载模型更快
+  - 首次播报仍可能受到模型冷启动影响，尤其是 `1.7B Base` 模型
+  - 若追求更快速度，优先考虑使用 `0.6B` 版本、安装 `flash-attn`，或使用更强 GPU
+- 找不到单输入框入口
+  - 可在设置中的“对话交互模式”切换到单输入框
+  - 也可在聊天窗口底部点击“切换到单输入框”，或在单输入框中切回“历史对话框”
+- 语音识别结果没有自动进入输入框
+  - 唤醒后程序会根据当前模式，把语音草稿同步到聊天窗口输入框或单输入框
+  - 最终识别结果会直接触发一次本地提问；中途的 partial 文本仅用于草稿预览
 - 合并/解压失败
   - 确认所有分卷已完整下载并位于同一目录；用 7-Zip 从 `.001` 开始解压
 
@@ -167,6 +213,35 @@ Expand-Archive -LiteralPath .\assets\models.zip -DestinationPath .\res -Force
 7z x .\assets\voice_deps.zip.001 -o.\res -y
 New-Item -ItemType Directory -Force -Path .\res\llm | Out-Null
 7z x .\assets\llm.zip.001 -o.\res\llm -y
+```
+
+- 创建并安装 Qwen3-TTS 虚拟环境
+
+```powershell
+python -m venv .\.venv-qwen3-tts
+.\.venv-qwen3-tts\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-qwen3-tts\Scripts\python.exe -m pip install qwen-tts soundfile
+```
+
+- 指定 Qwen3-TTS Python 解释器
+
+```powershell
+$env:XIAOMO_QWEN_TTS_PYTHON = "E:\desktoppet\Pet\.venv-qwen3-tts\Scripts\python.exe"
+```
+
+- 直接测试本地 Qwen3-TTS 后端
+
+```powershell
+$env:KMP_DUPLICATE_LIB_OK = "TRUE"
+.\.venv-qwen3-tts\Scripts\python.exe .\res\voice_deps\qwen3-tts\backend\qwen3_tts_backend.py `
+  --model-dir .\res\voice_deps\qwen3-tts `
+  --output-file .\build-msvc\qwen3_tts_test.wav `
+  --text "你好，我是小墨。" `
+  --language Chinese `
+  --mode base `
+  --ref-audio .\res\voice_deps\qwen3-tts\prompt\default_reference.mp3 `
+  --x-vector-only `
+  --max-new-tokens 256
 ```
 
 - 指定 LLM 运行器与模型（环境变量覆盖）
