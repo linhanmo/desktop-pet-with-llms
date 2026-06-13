@@ -429,6 +429,65 @@ static QString normalizeChatBubbleStyleId(const QString& styleId)
     return QStringLiteral("Round");
 }
 
+static QString normalizeChatInteractionMode(const QString& mode)
+{
+    const QString s = mode.trimmed().toLower();
+    if (s == QStringLiteral("history")
+        || s == QStringLiteral("dialog")
+        || s == QStringLiteral("chat")
+        || s == QStringLiteral("window"))
+    {
+        return QStringLiteral("history");
+    }
+    return QStringLiteral("quick");
+}
+
+static QString normalizeQuickInputStyle(const QString& style)
+{
+    const QString s = style.trimmed().toLower();
+    if (s == QStringLiteral("dock")
+        || s == QStringLiteral("sidebar")
+        || s == QStringLiteral("edge"))
+    {
+        return QStringLiteral("dock");
+    }
+    if (s == QStringLiteral("hud")
+        || s == QStringLiteral("frameless")
+        || s == QStringLiteral("overlay"))
+    {
+        return QStringLiteral("hud");
+    }
+    return QStringLiteral("floating");
+}
+
+QString SettingsManager::chatInteractionMode() const
+{
+    return normalizeChatInteractionMode(m_chatInteractionMode);
+}
+
+void SettingsManager::setChatInteractionMode(const QString& mode)
+{
+    const QString normalized = normalizeChatInteractionMode(mode);
+    if (m_chatInteractionMode == normalized)
+        return;
+    m_chatInteractionMode = normalized;
+    save();
+}
+
+QString SettingsManager::quickInputStyle() const
+{
+    return normalizeQuickInputStyle(m_quickInputStyle);
+}
+
+void SettingsManager::setQuickInputStyle(const QString& style)
+{
+    const QString normalized = normalizeQuickInputStyle(style);
+    if (m_quickInputStyle == normalized)
+        return;
+    m_quickInputStyle = normalized;
+    save();
+}
+
 QString SettingsManager::chatBubbleStyle() const
 {
     return normalizeChatBubbleStyleId(m_chatBubbleStyle);
@@ -448,6 +507,22 @@ void SettingsManager::setOfflineTtsEnabled(bool v)
 {
     if (m_offlineTtsEnabled == v) return;
     m_offlineTtsEnabled = v;
+    save();
+}
+
+bool SettingsManager::kwsEnabled() const { return m_kwsEnabled; }
+void SettingsManager::setKwsEnabled(bool v)
+{
+    if (m_kwsEnabled == v) return;
+    m_kwsEnabled = v;
+    save();
+}
+
+bool SettingsManager::sttEnabled() const { return m_sttEnabled; }
+void SettingsManager::setSttEnabled(bool v)
+{
+    if (m_sttEnabled == v) return;
+    m_sttEnabled = v;
     save();
 }
 
@@ -657,9 +732,13 @@ void SettingsManager::load()
     m_aiSystemPrompt = root.value("aiSystemPrompt").toString();
     m_llmStyle = root.value("llmStyle").toString(QStringLiteral("Original"));
     m_llmModelSize = root.value("llmModelSize").toString(QStringLiteral("1.5B"));
+    m_chatInteractionMode = root.value("chatInteractionMode").toString(QStringLiteral("quick"));
+    m_quickInputStyle = root.value("quickInputStyle").toString(QStringLiteral("floating"));
     m_chatBubbleStyle = root.value("chatBubbleStyle").toString(QStringLiteral("Era"));
 
     m_offlineTtsEnabled = root.value("offlineTtsEnabled").toBool(false);
+    m_kwsEnabled = root.value("kwsEnabled").toBool(false);
+    m_sttEnabled = root.value("sttEnabled").toBool(false);
     m_sherpaOnnxBinDir = root.value("sherpaOnnxBinDir").toString().trimmed();
     m_sherpaTtsModel = root.value("sherpaTtsModel").toString().trimmed();
     m_sherpaTtsArgs = root.value("sherpaTtsArgs").toString();
@@ -707,9 +786,13 @@ void SettingsManager::save() const
     root["aiSystemPrompt"] = m_aiSystemPrompt;
     root["llmStyle"] = llmStyle();
     root["llmModelSize"] = llmModelSize();
+    root["chatInteractionMode"] = chatInteractionMode();
+    root["quickInputStyle"] = quickInputStyle();
     root["chatBubbleStyle"] = chatBubbleStyle();
 
     root["offlineTtsEnabled"] = m_offlineTtsEnabled;
+    root["kwsEnabled"] = m_kwsEnabled;
+    root["sttEnabled"] = m_sttEnabled;
     root["sherpaOnnxBinDir"] = m_sherpaOnnxBinDir;
     root["sherpaTtsModel"] = m_sherpaTtsModel.trimmed();
     root["sherpaTtsArgs"] = m_sherpaTtsArgs;

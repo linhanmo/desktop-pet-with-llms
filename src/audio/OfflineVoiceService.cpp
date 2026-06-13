@@ -1,14 +1,22 @@
 #include "audio/OfflineVoiceService.hpp"
 
 #include "common/SettingsManager.hpp"
+#include "common/Utils.hpp"
 
 #include <QProcess>
 #include <QTimer>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QMessageBox>
 #include <QDesktopServices>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QStandardPaths>
 #include <QUrl>
 #include <QPushButton>
 #include <QCoreApplication>
@@ -32,6 +40,252 @@
 #endif
 
 static bool g_speakerHintShown = false;
+static bool g_ttsHintShown = false;
+
+namespace {
+
+struct DebugServerConfig {
+    QString serverUrl{QStringLiteral("http://127.0.0.1:7777/event")};
+    QString sessionId{QStringLiteral("audio-output-unavailable")};
+};
+
+static QString clampForLog(const QString& value, int maxLen = 400)
+{
+    QString normalized = value;
+    normalized.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    if (normalized.size() > maxLen)
+        normalized = normalized.left(maxLen) + QStringLiteral("...(truncated)");
+    return normalized;
+}
+
+static QString audioDeviceSummary(const QAudioDevice& device)
+{
+    if (device.isNull())
+        return QStringLiteral("<null>");
+
+    return QStringLiteral("%1 [%2]")
+        .arg(device.description(), QString::fromLatin1(device.id().toHex()));
+}
+
+static QString firstExistingPath(const QStringList& candidates)
+{
+    for (const QString& candidate : candidates) {
+        if (!candidate.isEmpty() && QFileInfo::exists(candidate))
+            return QDir::cleanPath(candidate);
+    }
+    return QString();
+}
+
+static QString detectQwenTtsModelMode(const QString& modelDir)
+{
+    if (modelDir.isEmpty())
+        return QStringLiteral("base");
+
+    const QString configPath = QDir(modelDir).filePath(QStringLiteral("config.json"));
+    QFile configFile(configPath);
+    if (configFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QJsonDocument doc = QJsonDocument::fromJson(configFile.readAll());
+        const QString mode = doc.object().value(QStringLiteral("tts_model_type")).toString().trimmed().toLower();
+        if (!mode.isEmpty())
+            return mode;
+    }
+
+    const QString dirName = QFileInfo(modelDir).fileName().trimmed().toLower();
+    if (dirName.contains(QStringLiteral("customvoice")) || dirName.contains(QStringLiteral("custom_voice")))
+        return QStringLiteral("customvoice");
+    if (dirName.contains(QStringLiteral("voicedesign")) || dirName.contains(QStringLiteral("voice_design")))
+        return QStringLiteral("voicedesign");
+    return QStringLiteral("base");
+}
+
+static QString qwenTtsBackendScriptPath(const QString& modelDir)
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+    return firstExistingPath({
+        QDir(modelDir).filePath(QStringLiteral("backend/qwen3_tts_backend.py")),
+        appResourcePath(QStringLiteral("voice_deps/qwen3-tts/backend/qwen3_tts_backend.py")),
+        QDir(appDir).filePath(QStringLiteral("../res/voice_deps/qwen3-tts/backend/qwen3_tts_backend.py")),
+        QStringLiteral("E:/desktoppet/Pet/res/voice_deps/qwen3-tts/backend/qwen3_tts_backend.py")
+    });
+}
+
+static QString qwenTtsDefaultPromptAudioPath(const QString& modelDir)
+{
+    return firstExistingPath({
+        QDir(modelDir).filePath(QStringLiteral("prompt/default_reference.wav")),
+        QDir(modelDir).filePath(QStringLiteral("prompt/default_reference.mp3")),
+        QDir(modelDir).filePath(QStringLiteral("prompt/default.wav")),
+        QDir(modelDir).filePath(QStringLiteral("prompt/default.mp3"))
+    });
+}
+
+static QString qwenTtsDefaultPromptTextPath(const QString& modelDir)
+{
+    return firstExistingPath({
+        QDir(modelDir).filePath(QStringLiteral("prompt/default_reference.txt")),
+        QDir(modelDir).filePath(QStringLiteral("prompt/default.txt"))
+    });
+}
+
+static QString qwenTtsPythonExecutable()
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString envOverride = qEnvironmentVariable("XIAOMO_QWEN_TTS_PYTHON").trimmed();
+    const QString pathPython = QStandardPaths::findExecutable(QStringLiteral("python"));
+    const QString pathPython3 = QStandardPaths::findExecutable(QStringLiteral("python3"));
+
+#if defined(Q_OS_WIN32)
+    return firstExistingPath({
+        envOverride,
+        QDir(appDir).filePath(QStringLiteral("../.venv-qwen3-tts/Scripts/python.exe")),
+        QDir(appDir).filePath(QStringLiteral("../../.venv-qwen3-tts/Scripts/python.exe")),
+        QStringLiteral("E:/desktoppet/Pet/.venv-qwen3-tts/Scripts/python.exe"),
+        pathPython,
+        pathPython3
+    });
+#else
+    return firstExistingPath({
+        envOverride,
+        QDir(appDir).filePath(QStringLiteral("../.venv-qwen3-tts/bin/python3")),
+        QDir(appDir).filePath(QStringLiteral("../../.venv-qwen3-tts/bin/python3")),
+        pathPython3,
+        pathPython
+    });
+#endif
+}
+
+static QString qwenTtsModelPath(const QString& voiceDepsDir)
+{
+    const QStringList candidates = {
+        QStringLiteral("Qwen3-TTS-12Hz-1.7B-CustomVoice"),
+        QStringLiteral("Qwen3-TTS-12Hz-0.6B-CustomVoice"),
+        QStringLiteral("Qwen3-TTS-12Hz-1.7B-VoiceDesign"),
+        QStringLiteral("Qwen3-TTS-12Hz-1.7B-Base"),
+        QStringLiteral("Qwen3-TTS-12Hz-0.6B-Base"),
+        QStringLiteral("qwen3-tts")
+    };
+
+    for (const QString& name : candidates) {
+        const QString candidate = QDir(voiceDepsDir).filePath(name);
+        if (QFileInfo::exists(candidate) && QFileInfo(candidate).isDir())
+            return candidate;
+    }
+    return QDir(voiceDepsDir).filePath(QStringLiteral("qwen3-tts"));
+}
+
+static QString qwenTtsBackendSignature(const QString& pythonExe,
+                                       const QString& backendScript,
+                                       const QString& modelDir,
+                                       const QString& modelMode)
+{
+    return QStringLiteral("%1\n%2\n%3\n%4")
+        .arg(pythonExe, backendScript, modelDir, modelMode);
+}
+
+static QString mediaStatusName(QMediaPlayer::MediaStatus status)
+{
+    switch (status) {
+    case QMediaPlayer::NoMedia: return QStringLiteral("NoMedia");
+    case QMediaPlayer::LoadingMedia: return QStringLiteral("LoadingMedia");
+    case QMediaPlayer::LoadedMedia: return QStringLiteral("LoadedMedia");
+    case QMediaPlayer::StalledMedia: return QStringLiteral("StalledMedia");
+    case QMediaPlayer::BufferingMedia: return QStringLiteral("BufferingMedia");
+    case QMediaPlayer::BufferedMedia: return QStringLiteral("BufferedMedia");
+    case QMediaPlayer::EndOfMedia: return QStringLiteral("EndOfMedia");
+    case QMediaPlayer::InvalidMedia: return QStringLiteral("InvalidMedia");
+    }
+    return QStringLiteral("UnknownMediaStatus");
+}
+
+static QString playbackStateName(QMediaPlayer::PlaybackState state)
+{
+    switch (state) {
+    case QMediaPlayer::StoppedState: return QStringLiteral("StoppedState");
+    case QMediaPlayer::PlayingState: return QStringLiteral("PlayingState");
+    case QMediaPlayer::PausedState: return QStringLiteral("PausedState");
+    }
+    return QStringLiteral("UnknownPlaybackState");
+}
+
+static QString debugEnvFilePath()
+{
+    const QString relativePath = QStringLiteral(".dbg/audio-output-unavailable.env");
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString currentDir = QDir::currentPath();
+    const QStringList candidates = {
+        QDir(currentDir).filePath(relativePath),
+        QDir(appDir).filePath(relativePath),
+        QDir(appDir).filePath(QStringLiteral("../") + relativePath),
+        QDir(appDir).filePath(QStringLiteral("../../") + relativePath),
+        QStringLiteral("E:/desktoppet/Pet/.dbg/audio-output-unavailable.env")
+    };
+
+    for (const QString& candidate : candidates) {
+        if (QFileInfo::exists(candidate))
+            return QDir::cleanPath(candidate);
+    }
+
+    return QString();
+}
+
+static DebugServerConfig loadDebugServerConfig()
+{
+    static const DebugServerConfig config = [] {
+        DebugServerConfig loaded;
+        const QString envPath = debugEnvFilePath();
+        if (envPath.isEmpty())
+            return loaded;
+
+        QFile envFile(envPath);
+        if (!envFile.open(QIODevice::ReadOnly | QIODevice::Text))
+            return loaded;
+
+        const QString content = QString::fromUtf8(envFile.readAll());
+        const QStringList lines = content.split(QLatin1Char('\n'));
+        for (const QString& rawLine : lines) {
+            const QString line = rawLine.trimmed();
+            if (line.startsWith(QStringLiteral("DEBUG_SERVER_URL="))) {
+                loaded.serverUrl = line.section(QLatin1Char('='), 1);
+            } else if (line.startsWith(QStringLiteral("DEBUG_SESSION_ID="))) {
+                loaded.sessionId = line.section(QLatin1Char('='), 1);
+            }
+        }
+        return loaded;
+    }();
+
+    return config;
+}
+
+static QNetworkAccessManager* debugNetworkManager()
+{
+    static QNetworkAccessManager* manager = new QNetworkAccessManager(QCoreApplication::instance());
+    return manager;
+}
+
+static void reportDebugEvent(const char* hypothesisId,
+                             const char* location,
+                             const QString& message,
+                             const QJsonObject& data = QJsonObject())
+{
+    const DebugServerConfig config = loadDebugServerConfig();
+
+    QJsonObject payload{
+        {QStringLiteral("sessionId"), config.sessionId},
+        {QStringLiteral("runId"), QStringLiteral("pre-fix")},
+        {QStringLiteral("hypothesisId"), QString::fromLatin1(hypothesisId)},
+        {QStringLiteral("location"), QString::fromLatin1(location)},
+        {QStringLiteral("msg"), message},
+        {QStringLiteral("ts"), QString::number(QDateTime::currentMSecsSinceEpoch())}
+    };
+    if (!data.isEmpty())
+        payload.insert(QStringLiteral("data"), data);
+
+    QNetworkRequest request(QUrl(config.serverUrl));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    debugNetworkManager()->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+}
+
+} // namespace
 
 static void showSpeakerHint(const QString& detail)
 {
@@ -61,6 +315,80 @@ static void showSpeakerHint(const QString& detail)
     box.addButton(QObject::tr("关闭"), QMessageBox::RejectRole);
     box.exec();
 #endif
+}
+
+static QString combineProcessOutput(QProcess* process)
+{
+    if (!process)
+        return QString();
+
+    const QString stdoutText = QString::fromLocal8Bit(process->readAllStandardOutput());
+    const QString stderrText = QString::fromLocal8Bit(process->readAllStandardError());
+    if (stdoutText.isEmpty())
+        return stderrText;
+    if (stderrText.isEmpty())
+        return stdoutText;
+    return stdoutText + QStringLiteral("\n") + stderrText;
+}
+
+static QString explainTtsFailure(const QString& detail)
+{
+    const QString normalized = detail.trimmed();
+    if (normalized.contains(QStringLiteral("Invalid option --encoder-model"), Qt::CaseInsensitive)
+        || normalized.contains(QStringLiteral("Invalid option --decoder-model"), Qt::CaseInsensitive)
+        || normalized.contains(QStringLiteral("Invalid option --speech-tokenizer-dir"), Qt::CaseInsensitive))
+    {
+        return QObject::tr(
+            "当前内置的 sherpa-onnx TTS 可执行程序不支持 `qwen3-tts` 这套参数，"
+            "语音合成进程在生成音频前就已经退出。\n\n"
+            "这不是系统输出设备不可用，而是 TTS 运行时与模型资源不兼容。"
+            "\n\n原始错误：\n%1").arg(clampForLog(normalized, 1600));
+    }
+
+    if (normalized.contains(QStringLiteral("No module named 'qwen_tts'"), Qt::CaseInsensitive)
+        || normalized.contains(QStringLiteral("No module named \"qwen_tts\""), Qt::CaseInsensitive))
+    {
+        return QObject::tr(
+            "本地 Qwen3-TTS Python 环境缺少 `qwen-tts` 依赖，无法启动语音合成后端。"
+            "\n\n请检查 `.venv-qwen3-tts` 是否创建完成，或重新安装运行时依赖。"
+            "\n\n原始错误：\n%1").arg(clampForLog(normalized, 1600));
+    }
+
+    if (normalized.contains(QStringLiteral("requires --ref-audio"), Qt::CaseInsensitive)
+        || normalized.contains(QStringLiteral("default prompt audio"), Qt::CaseInsensitive))
+    {
+        return QObject::tr(
+            "当前加载的是 Qwen3-TTS Base 模型，它需要参考音频。"
+            "\n\n请确保 `res/voice_deps/qwen3-tts/prompt/default_reference.mp3` 存在，"
+            "或改为提供 `CustomVoice/VoiceDesign` 模型目录。"
+            "\n\n原始错误：\n%1").arg(clampForLog(normalized, 1600));
+    }
+
+    if (normalized.isEmpty()) {
+        return QObject::tr(
+            "离线语音合成进程在生成音频前退出，未产生可播放的 wav 文件。"
+            "\n\n这不是系统输出设备不可用，更可能是 TTS 运行时或模型资源异常。");
+    }
+
+    return normalized;
+}
+
+static void showTtsHint(const QString& detail)
+{
+    if (g_ttsHintShown) return;
+    g_ttsHintShown = true;
+
+    QString tip = QObject::tr(
+        "离线语音合成不可用。\n\n当前问题发生在 TTS 引擎/模型阶段，不是系统音频输出设备。");
+    const QString d = explainTtsFailure(detail);
+    if (!d.isEmpty())
+        tip += QStringLiteral("\n\n") + d;
+
+    QMessageBox box(QMessageBox::Warning, QObject::tr("离线语音合成不可用"), tip, QMessageBox::NoButton, nullptr);
+    box.setWindowModality(Qt::ApplicationModal);
+    box.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    box.addButton(QObject::tr("关闭"), QMessageBox::RejectRole);
+    box.exec();
 }
 
 static bool g_micHintShown = false;
@@ -116,16 +444,15 @@ void OfflineVoiceService::reloadFromSettings()
 
 void OfflineVoiceService::start()
 {
-    if (m_settings.kwsEnabled || m_settings.sttEnabled) {
-        initAudioDevices();
-        startMicIfNeeded();
-    }
+    syncCaptureState();
+    warmTtsBackendIfNeeded();
 }
 
 void OfflineVoiceService::stop()
 {
     stopMic();
     stopTts();
+    stopTtsBackend();
     if (m_sttProcess) {
         m_sttProcess->kill();
         m_sttProcess->deleteLater();
@@ -142,12 +469,10 @@ void OfflineVoiceService::speakText(const QString& text)
 
 void OfflineVoiceService::startListening()
 {
-    if (m_mode == Mode::Idle || m_mode == Mode::Listening) {
-        m_mode = Mode::Listening;
-        m_kwsActive = true;
-        m_vadDetected = false;
-        startMicIfNeeded();
-    }
+    if (!shouldCaptureMic())
+        return;
+    resetListeningState();
+    syncCaptureState();
 }
 
 void OfflineVoiceService::stopListening()
@@ -168,8 +493,8 @@ OfflineVoiceService::SettingsSnapshot OfflineVoiceService::readSettings() const
     const auto& sm = SettingsManager::instance();
     
     s.ttsEnabled = sm.offlineTtsEnabled();
-    s.kwsEnabled = false;
-    s.sttEnabled = false;
+    s.kwsEnabled = sm.kwsEnabled();
+    s.sttEnabled = sm.sttEnabled();
     s.binDir = sm.sherpaOnnxBinDir();
     s.ttsArgs = sm.sherpaTtsArgs();
     s.ttsVolumePercent = sm.ttsVolumePercent();
@@ -187,21 +512,109 @@ OfflineVoiceService::SettingsSnapshot OfflineVoiceService::readSettings() const
     s.kwsModelPath = sherpaDir + QStringLiteral("/bin");
     s.vadModelPath = QDir(voiceDepsDir).filePath(QStringLiteral("silero-vad/src/silero_vad/data/silero_vad.onnx"));
     s.sttModelPath = QDir(voiceDepsDir).filePath(QStringLiteral("sensevoice-small/model.pt"));
-    s.ttsModelPath = QDir(voiceDepsDir).filePath(QStringLiteral("qwen3-tts"));
-    s.ttsArgs = QStringLiteral("--encoder-model=\"%1/model.safetensors\" --decoder-model=\"%1/model.safetensors\" --speech-tokenizer-dir=\"%1/speech_tokenizer\"").arg(s.ttsModelPath);
+    s.ttsModelPath = qwenTtsModelPath(voiceDepsDir);
+    s.ttsArgs = QStringLiteral("qwen3-local-backend:%1").arg(s.ttsModelPath);
     
     return s;
 }
 
 void OfflineVoiceService::applySettingsSnapshot(const SettingsSnapshot& next)
 {
+    const bool audioPipelineChanged =
+        m_settings.kwsEnabled != next.kwsEnabled ||
+        m_settings.sttEnabled != next.sttEnabled ||
+        m_settings.kwsModelPath != next.kwsModelPath ||
+        m_settings.vadModelPath != next.vadModelPath ||
+        m_settings.sttModelPath != next.sttModelPath;
     if (m_settings.ttsArgs != next.ttsArgs || 
         m_settings.ttsVolumePercent != next.ttsVolumePercent ||
-        m_settings.binDir != next.binDir) {
+        m_settings.binDir != next.binDir ||
+        m_settings.ttsModelPath != next.ttsModelPath) {
         stopTts();
+        stopTtsBackend();
     }
     
     m_settings = next;
+    if (audioPipelineChanged)
+        resetListeningState();
+    syncCaptureState();
+    warmTtsBackendIfNeeded();
+}
+
+bool OfflineVoiceService::shouldCaptureMic() const
+{
+    return m_settings.kwsEnabled || m_settings.sttEnabled;
+}
+
+void OfflineVoiceService::resetListeningState()
+{
+    m_vadBuffer.clear();
+    m_vadSilenceFrames = 0;
+    if (!m_sttPartialResult.isEmpty()) {
+        m_sttPartialResult.clear();
+        emit sttPartialResult(QString());
+    }
+
+    if (m_settings.kwsEnabled) {
+        m_mode = Mode::Listening;
+        m_kwsActive = true;
+        m_vadDetected = false;
+        return;
+    }
+
+    if (m_settings.sttEnabled) {
+        m_mode = Mode::Recording;
+        m_kwsActive = false;
+        m_vadDetected = true;
+        return;
+    }
+
+    m_mode = Mode::Idle;
+    m_kwsActive = false;
+    m_vadDetected = false;
+}
+
+void OfflineVoiceService::syncCaptureState()
+{
+    if (!shouldCaptureMic()) {
+        stopMic();
+        if (m_sttProcess) {
+            m_sttProcess->kill();
+            m_sttProcess->deleteLater();
+            m_sttProcess = nullptr;
+        }
+        resetListeningState();
+        return;
+    }
+
+    initAudioDevices();
+    startMicIfNeeded();
+}
+
+void OfflineVoiceService::pauseCaptureForTts()
+{
+    if (!shouldCaptureMic()) {
+        m_resumeCaptureAfterTts = false;
+        return;
+    }
+
+    if (m_sttProcess) {
+        m_sttProcess->kill();
+        m_sttProcess->deleteLater();
+        m_sttProcess = nullptr;
+    }
+
+    stopMic();
+    m_resumeCaptureAfterTts = true;
+}
+
+void OfflineVoiceService::resumeCaptureAfterTtsIfNeeded()
+{
+    if (!m_resumeCaptureAfterTts)
+        return;
+
+    m_resumeCaptureAfterTts = false;
+    syncCaptureState();
 }
 
 QString OfflineVoiceService::exePath(const QString& baseName) const
@@ -253,21 +666,26 @@ void OfflineVoiceService::initAudioDevices()
         m_mediaDevices = new QMediaDevices(this);
     }
 
+    if (m_mediaDeviceSignalsConnected)
+        return;
+
     QObject::connect(m_mediaDevices, &QMediaDevices::audioInputsChanged,
                      this, [this]() {
         if (m_mode == Mode::Listening || m_mode == Mode::Recording) {
             stopMic();
             startMicIfNeeded();
         }
-    }, Qt::UniqueConnection);
-    
+    });
+
     QObject::connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
                      this, [this]() {
         if (m_ttsAudio) {
             delete m_ttsAudio;
             m_ttsAudio = nullptr;
         }
-    }, Qt::UniqueConnection);
+    });
+
+    m_mediaDeviceSignalsConnected = true;
 }
 
 void OfflineVoiceService::startMicIfNeeded()
@@ -342,6 +760,73 @@ void OfflineVoiceService::startMicIfNeeded()
             emit audioError(detail);
         }
     });
+}
+
+bool OfflineVoiceService::ensureTtsAudioOutput(int ttsVolumePercent, QString* errorDetail)
+{
+    const QAudioDevice defaultOutput = QMediaDevices::defaultAudioOutput();
+    const auto outputs = QMediaDevices::audioOutputs();
+    QJsonArray availableOutputs;
+    for (const QAudioDevice& dev : outputs) {
+        availableOutputs.append(audioDeviceSummary(dev));
+    }
+
+    if (m_ttsAudio) {
+        m_ttsAudio->setVolume(qBound(0.0, double(ttsVolumePercent) / 100.0, 1.0));
+        // #region debug-point D:reuse-existing-output
+        reportDebugEvent("D",
+                         "OfflineVoiceService::ensureTtsAudioOutput/reuse",
+                         QStringLiteral("[DEBUG] Reusing existing QAudioOutput"),
+                         QJsonObject{
+                             {QStringLiteral("defaultOutput"), audioDeviceSummary(defaultOutput)},
+                             {QStringLiteral("availableOutputs"), availableOutputs},
+                             {QStringLiteral("currentVolume"), m_ttsAudio->volume()}
+                         });
+        // #endregion
+        return true;
+    }
+
+    QAudioDevice outputDevice = defaultOutput;
+    if (outputDevice.isNull()) {
+        for (const QAudioDevice& dev : outputs) {
+            if (!dev.isNull()) {
+                outputDevice = dev;
+                break;
+            }
+        }
+    }
+
+    if (outputDevice.isNull()) {
+        // #region debug-point D:no-output-device
+        reportDebugEvent("D",
+                         "OfflineVoiceService::ensureTtsAudioOutput/no-device",
+                         QStringLiteral("[DEBUG] Failed to select any audio output device"),
+                         QJsonObject{
+                             {QStringLiteral("defaultOutput"), audioDeviceSummary(defaultOutput)},
+                             {QStringLiteral("availableOutputs"), availableOutputs},
+                             {QStringLiteral("requestedVolumePercent"), ttsVolumePercent}
+                         });
+        // #endregion
+        if (errorDetail)
+            *errorDetail = QStringLiteral("No available audio output device found.");
+        return false;
+    }
+
+    m_ttsAudio = new QAudioOutput(outputDevice, this);
+    m_ttsAudio->setVolume(qBound(0.0, double(ttsVolumePercent) / 100.0, 1.0));
+    // #region debug-point D:create-output
+    reportDebugEvent("D",
+                     "OfflineVoiceService::ensureTtsAudioOutput/create",
+                     QStringLiteral("[DEBUG] Created QAudioOutput for TTS"),
+                     QJsonObject{
+                         {QStringLiteral("defaultOutput"), audioDeviceSummary(defaultOutput)},
+                         {QStringLiteral("selectedOutput"), audioDeviceSummary(outputDevice)},
+                         {QStringLiteral("availableOutputs"), availableOutputs},
+                         {QStringLiteral("requestedVolumePercent"), ttsVolumePercent},
+                         {QStringLiteral("actualVolume"), m_ttsAudio->volume()}
+                     });
+    // #endregion
+    return true;
 }
 
 void OfflineVoiceService::stopMic()
@@ -422,6 +907,24 @@ void OfflineVoiceService::processAudioBuffer(const QByteArray& data)
 
 void OfflineVoiceService::processKWS(const float* samples, size_t count)
 {
+    if (!m_settings.kwsEnabled)
+        return;
+
+    auto handleWakeWordDetected = [this]() {
+        emit wakeWordDetected();
+        if (!m_settings.sttEnabled) {
+            m_mode = Mode::Listening;
+            m_kwsActive = true;
+            m_vadDetected = false;
+            return;
+        }
+        m_kwsActive = false;
+        m_mode = Mode::Recording;
+        m_vadDetected = true;
+        m_vadBuffer.clear();
+        m_vadSilenceFrames = 0;
+    };
+
     if (!QDir(m_settings.kwsModelPath).exists()) {
         static bool warned = false;
         if (!warned) {
@@ -436,12 +939,7 @@ void OfflineVoiceService::processKWS(const float* samples, size_t count)
         energy = sqrt(energy / float(count));
         
         if (energy > 0.05f) {
-            emit wakeWordDetected();
-            m_kwsActive = false;
-            m_mode = Mode::Recording;
-            m_vadDetected = true;
-            m_vadBuffer.clear();
-            m_vadSilenceFrames = 0;
+            handleWakeWordDetected();
             qDebug() << "Wake word detected via energy threshold";
         }
         return;
@@ -467,12 +965,7 @@ void OfflineVoiceService::processKWS(const float* samples, size_t count)
         energy = sqrt(energy / float(count));
         
         if (energy > 0.05f) {
-            emit wakeWordDetected();
-            m_kwsActive = false;
-            m_mode = Mode::Recording;
-            m_vadDetected = true;
-            m_vadBuffer.clear();
-            m_vadSilenceFrames = 0;
+            handleWakeWordDetected();
             qDebug() << "Wake word detected via energy threshold";
         }
         return;
@@ -485,12 +978,7 @@ void OfflineVoiceService::processKWS(const float* samples, size_t count)
     energy = sqrt(energy / float(count));
     
     if (energy > 0.05f) {
-        emit wakeWordDetected();
-        m_kwsActive = false;
-        m_mode = Mode::Recording;
-        m_vadDetected = true;
-        m_vadBuffer.clear();
-        m_vadSilenceFrames = 0;
+        handleWakeWordDetected();
         qDebug() << "Wake word detected, starting recording";
     }
 }
@@ -516,11 +1004,7 @@ void OfflineVoiceService::processVAD(const float* samples, size_t count)
                 if (m_vadBuffer.size() > 16000) {
                     processSTT(m_vadBuffer.data(), m_vadBuffer.size());
                 }
-                m_vadDetected = false;
-                m_vadBuffer.clear();
-                m_vadSilenceFrames = 0;
-                m_mode = Mode::Listening;
-                m_kwsActive = true;
+                resetListeningState();
             }
         } else {
             m_vadSilenceFrames = 0;
@@ -541,11 +1025,7 @@ void OfflineVoiceService::processVAD(const float* samples, size_t count)
             if (m_vadBuffer.size() > 16000) {
                 processSTT(m_vadBuffer.data(), m_vadBuffer.size());
             }
-            m_vadDetected = false;
-            m_vadBuffer.clear();
-            m_vadSilenceFrames = 0;
-            m_mode = Mode::Listening;
-            m_kwsActive = true;
+            resetListeningState();
             qDebug() << "VAD silence detected, stopping recording";
         }
     } else {
@@ -559,6 +1039,11 @@ void OfflineVoiceService::processSTT(const float* samples, size_t count)
 {
     if (!m_settings.sttEnabled || !QFileInfo::exists(m_settings.sttModelPath)) {
         return;
+    }
+
+    if (!m_sttPartialResult.isEmpty()) {
+        m_sttPartialResult.clear();
+        emit sttPartialResult(QString());
     }
     
     QString wavPath = SettingsManager::instance().cacheDir() + QStringLiteral("/stt_temp.wav");
@@ -618,18 +1103,44 @@ void OfflineVoiceService::processSTT(const float* samples, size_t count)
         m_settings.sttModelPath, wavPath);
     m_sttProcess->setProgram(sttExe);
     m_sttProcess->setArguments(splitArgs(args));
+
+    connect(m_sttProcess, &QProcess::readyReadStandardOutput, this, [this]{
+        if (!m_sttProcess)
+            return;
+        const QString chunk = QString::fromLocal8Bit(m_sttProcess->readAllStandardOutput());
+        if (chunk.isEmpty())
+            return;
+
+        m_sttPartialResult += chunk;
+        QString preview = m_sttPartialResult;
+        preview.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+
+        QString partial;
+        const QStringList lines = preview.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        if (!lines.isEmpty())
+            partial = lines.back().trimmed();
+        else
+            partial = preview.trimmed();
+
+        if (!partial.isEmpty())
+            emit sttPartialResult(partial);
+    });
     
     connect(m_sttProcess, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), 
             this, [this, wavPath](int exitCode, QProcess::ExitStatus) {
+        QString result = m_sttPartialResult;
+        if (m_sttProcess)
+            result += QString::fromLocal8Bit(m_sttProcess->readAllStandardOutput());
         if (exitCode == 0) {
-            QString result = QString::fromLocal8Bit(m_sttProcess->readAllStandardOutput());
             if (!result.isEmpty()) {
+                emit sttPartialResult(QString());
                 emit sttResult(result.trimmed());
             }
         } else {
             QString error = QString::fromLocal8Bit(m_sttProcess->readAllStandardError());
             qWarning() << "STT error:" << error;
         }
+        m_sttPartialResult.clear();
         m_sttProcess->deleteLater();
         m_sttProcess = nullptr;
         QFile::remove(wavPath);
@@ -638,129 +1149,396 @@ void OfflineVoiceService::processSTT(const float* samples, size_t count)
     m_sttProcess->start();
 }
 
+bool OfflineVoiceService::ensureTtsBackendProcess(const QString& pythonExe,
+                                                  const QString& backendScript,
+                                                  const QString& modelDir,
+                                                  const QString& modelMode,
+                                                  QString* errorDetail)
+{
+    const QString signature = qwenTtsBackendSignature(pythonExe, backendScript, modelDir, modelMode);
+    if (m_tts && m_tts->state() != QProcess::NotRunning && m_ttsBackendSignature == signature)
+        return true;
+
+    stopTtsBackend();
+
+    m_tts = new QProcess(this);
+    m_ttsBackendSignature = signature;
+    m_ttsBackendStdoutBuffer.clear();
+    m_tts->setProgram(pythonExe);
+    m_tts->setArguments(QStringList{
+        backendScript,
+        QStringLiteral("--model-dir"), modelDir,
+        QStringLiteral("--language"), QStringLiteral("Chinese"),
+        QStringLiteral("--mode"), modelMode,
+        QStringLiteral("--max-new-tokens"), QStringLiteral("512"),
+        QStringLiteral("--serve-stdio")
+    });
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("KMP_DUPLICATE_LIB_OK"), QStringLiteral("TRUE"));
+    env.insert(QStringLiteral("PYTHONUTF8"), QStringLiteral("1"));
+    m_tts->setProcessEnvironment(env);
+
+    connect(m_tts, &QProcess::readyReadStandardOutput,
+            this, &OfflineVoiceService::handleTtsBackendStdout);
+    connect(m_tts, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        if (!m_tts)
+            return;
+
+        const QString detail = m_tts->errorString() + QStringLiteral("\n") + combineProcessOutput(m_tts);
+        reportDebugEvent("A",
+                         "OfflineVoiceService::ensureTtsBackendProcess/error",
+                         QStringLiteral("[DEBUG] Qwen3-TTS backend process error"),
+                         QJsonObject{
+                             {QStringLiteral("errorString"), m_tts->errorString()},
+                             {QStringLiteral("detail"), clampForLog(detail)},
+                             {QStringLiteral("requestActive"), m_ttsRequestActive}
+                         });
+
+        if (m_ttsRequestActive) {
+            m_ttsRequestActive = false;
+            showTtsHint(detail);
+            resumeCaptureAfterTtsIfNeeded();
+        }
+    });
+    connect(m_tts, qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this, [this](int exitCode, QProcess::ExitStatus) {
+        if (!m_tts)
+            return;
+
+        const QString detail = combineProcessOutput(m_tts);
+        const bool hadActiveRequest = m_ttsRequestActive;
+        reportDebugEvent(exitCode == 0 ? "B" : "A",
+                         "OfflineVoiceService::ensureTtsBackendProcess/finished",
+                         QStringLiteral("[DEBUG] Qwen3-TTS backend process finished"),
+                         QJsonObject{
+                             {QStringLiteral("exitCode"), exitCode},
+                             {QStringLiteral("detail"), clampForLog(detail)},
+                             {QStringLiteral("requestActive"), hadActiveRequest}
+                         });
+
+        m_ttsRequestActive = false;
+        m_tts->deleteLater();
+        m_tts = nullptr;
+        m_ttsBackendSignature.clear();
+        m_ttsBackendStdoutBuffer.clear();
+
+        if (exitCode != 0 && hadActiveRequest) {
+            showTtsHint(detail);
+            resumeCaptureAfterTtsIfNeeded();
+        }
+    });
+
+    m_tts->start();
+    if (!m_tts->waitForStarted(2000)) {
+        const QString detail = m_tts->errorString() + QStringLiteral("\n") + combineProcessOutput(m_tts);
+        if (errorDetail)
+            *errorDetail = detail.trimmed();
+        stopTtsBackend();
+        return false;
+    }
+
+    return true;
+}
+
+void OfflineVoiceService::handleTtsBackendStdout()
+{
+    if (!m_tts)
+        return;
+
+    m_ttsBackendStdoutBuffer += m_tts->readAllStandardOutput();
+    while (true) {
+        const int newlineIndex = m_ttsBackendStdoutBuffer.indexOf('\n');
+        if (newlineIndex < 0)
+            break;
+
+        const QByteArray rawLine = m_ttsBackendStdoutBuffer.left(newlineIndex).trimmed();
+        m_ttsBackendStdoutBuffer.remove(0, newlineIndex + 1);
+        if (rawLine.isEmpty())
+            continue;
+
+        QJsonParseError parseError;
+        const QJsonDocument doc = QJsonDocument::fromJson(rawLine, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+            reportDebugEvent("A",
+                             "OfflineVoiceService::handleTtsBackendStdout/parse",
+                             QStringLiteral("[DEBUG] Ignored non-JSON backend output"),
+                             QJsonObject{
+                                 {QStringLiteral("line"), clampForLog(QString::fromUtf8(rawLine))}
+                             });
+            continue;
+        }
+
+        const QJsonObject obj = doc.object();
+        if (obj.value(QStringLiteral("event")).toString() == QStringLiteral("ready")) {
+            reportDebugEvent("B",
+                             "OfflineVoiceService::handleTtsBackendStdout/ready",
+                             QStringLiteral("[DEBUG] Qwen3-TTS backend ready"),
+                             obj);
+            continue;
+        }
+
+        const qint64 responseId = obj.value(QStringLiteral("id")).toVariant().toLongLong();
+        const bool ok = obj.value(QStringLiteral("ok")).toBool();
+        const QString outputFile = obj.value(QStringLiteral("output_file")).toString();
+        if (responseId != m_activeTtsRequestId) {
+            if (ok && !outputFile.isEmpty())
+                QFile::remove(outputFile);
+            continue;
+        }
+
+        m_ttsRequestActive = false;
+        if (!ok) {
+            const QString detail = obj.value(QStringLiteral("error")).toString().trimmed()
+                + QStringLiteral("\n")
+                + obj.value(QStringLiteral("traceback")).toString().trimmed();
+            showTtsHint(detail.trimmed());
+            resumeCaptureAfterTtsIfNeeded();
+            continue;
+        }
+
+        const QFileInfo wavInfo(outputFile);
+        reportDebugEvent("B",
+                         "OfflineVoiceService::handleTtsBackendStdout/response",
+                         QStringLiteral("[DEBUG] Qwen3-TTS backend synthesized audio"),
+                         QJsonObject{
+                             {QStringLiteral("requestId"), QString::number(responseId)},
+                             {QStringLiteral("outputFile"), outputFile},
+                             {QStringLiteral("wavExists"), wavInfo.exists()},
+                             {QStringLiteral("wavSize"), QString::number(wavInfo.exists() ? wavInfo.size() : -1)},
+                             {QStringLiteral("sampleRate"), QString::number(obj.value(QStringLiteral("sample_rate")).toInt())},
+                             {QStringLiteral("frames"), QString::number(obj.value(QStringLiteral("frames")).toInt())}
+                         });
+
+        if (!wavInfo.exists()) {
+            showTtsHint(QObject::tr("Qwen3-TTS 已返回成功，但未找到生成的 wav 文件。"));
+            resumeCaptureAfterTtsIfNeeded();
+            continue;
+        }
+
+        QString outputError;
+        if (!ensureTtsAudioOutput(m_settings.ttsVolumePercent, &outputError)) {
+            showSpeakerHint(outputError);
+            resumeCaptureAfterTtsIfNeeded();
+            continue;
+        }
+
+        if (!m_ttsPlayer) {
+            m_ttsPlayer = new QMediaPlayer(this);
+            connect(m_ttsPlayer, &QMediaPlayer::errorOccurred, this,
+                    [this](QMediaPlayer::Error error, const QString& errorString) {
+                QJsonObject data{
+                    {QStringLiteral("errorCode"), int(error)},
+                    {QStringLiteral("errorString"), errorString},
+                    {QStringLiteral("source"), m_ttsPlayer ? m_ttsPlayer->source().toString() : QString()}
+                };
+                if (m_ttsAudio)
+                    data.insert(QStringLiteral("audioOutputDevice"), audioDeviceSummary(m_ttsAudio->device()));
+                reportDebugEvent("A",
+                                 "OfflineVoiceService::startTts/player-error",
+                                 QStringLiteral("[DEBUG] QMediaPlayer emitted error"),
+                                 data);
+            });
+            connect(m_ttsPlayer, &QMediaPlayer::mediaStatusChanged, this,
+                    [this](QMediaPlayer::MediaStatus status) {
+                QJsonObject data{
+                    {QStringLiteral("status"), mediaStatusName(status)},
+                    {QStringLiteral("errorString"), m_ttsPlayer ? m_ttsPlayer->errorString() : QString()},
+                    {QStringLiteral("source"), m_ttsPlayer ? m_ttsPlayer->source().toString() : QString()}
+                };
+                if (m_ttsAudio)
+                    data.insert(QStringLiteral("audioOutputDevice"), audioDeviceSummary(m_ttsAudio->device()));
+                reportDebugEvent(status == QMediaPlayer::InvalidMedia ? "C" : "A",
+                                 "OfflineVoiceService::startTts/player-status",
+                                 QStringLiteral("[DEBUG] QMediaPlayer media status changed"),
+                                 data);
+            });
+            connect(m_ttsPlayer, &QMediaPlayer::playbackStateChanged, this,
+                    [this](QMediaPlayer::PlaybackState state) {
+                QJsonObject data{
+                    {QStringLiteral("playbackState"), playbackStateName(state)},
+                    {QStringLiteral("errorString"), m_ttsPlayer ? m_ttsPlayer->errorString() : QString()},
+                    {QStringLiteral("source"), m_ttsPlayer ? m_ttsPlayer->source().toString() : QString()}
+                };
+                if (m_ttsAudio)
+                    data.insert(QStringLiteral("audioOutputDevice"), audioDeviceSummary(m_ttsAudio->device()));
+                reportDebugEvent("A",
+                                 "OfflineVoiceService::startTts/player-playback",
+                                 QStringLiteral("[DEBUG] QMediaPlayer playback state changed"),
+                                 data);
+            });
+        } else {
+            m_ttsPlayer->stop();
+        }
+
+        m_ttsPlayer->setAudioOutput(m_ttsAudio);
+        m_ttsPlayer->setSource(QUrl::fromLocalFile(outputFile));
+        reportDebugEvent("B",
+                         "OfflineVoiceService::startTts/player-source",
+                         QStringLiteral("[DEBUG] Prepared QMediaPlayer source for generated wav"),
+                         QJsonObject{
+                             {QStringLiteral("wavPath"), outputFile},
+                             {QStringLiteral("wavSize"), QString::number(wavInfo.size())},
+                             {QStringLiteral("sourceUrl"), QUrl::fromLocalFile(outputFile).toString()},
+                             {QStringLiteral("audioOutputDevice"), m_ttsAudio ? audioDeviceSummary(m_ttsAudio->device()) : QStringLiteral("<null>")}
+                         });
+
+        connect(m_ttsPlayer, &QMediaPlayer::errorOccurred, this,
+                [this](QMediaPlayer::Error, const QString &errorString) {
+            qWarning() << "TTS playback error:" << errorString;
+            showSpeakerHint(errorString);
+            resumeCaptureAfterTtsIfNeeded();
+        }, Qt::SingleShotConnection);
+        connect(m_ttsPlayer, &QMediaPlayer::mediaStatusChanged, this,
+                [this](QMediaPlayer::MediaStatus status) {
+            if (status == QMediaPlayer::EndOfMedia
+                || status == QMediaPlayer::InvalidMedia
+                || status == QMediaPlayer::NoMedia)
+            {
+                resumeCaptureAfterTtsIfNeeded();
+            }
+        }, Qt::SingleShotConnection);
+
+        m_ttsPlayer->play();
+    }
+}
+
+void OfflineVoiceService::warmTtsBackendIfNeeded()
+{
+    if (!m_settings.ttsEnabled)
+        return;
+
+    const QString pythonExe = qwenTtsPythonExecutable();
+    const QString backendScript = qwenTtsBackendScriptPath(m_settings.ttsModelPath);
+    const QString modelMode = detectQwenTtsModelMode(m_settings.ttsModelPath);
+    const bool canRunBackend =
+        !pythonExe.isEmpty() && QFileInfo::exists(pythonExe) &&
+        !backendScript.isEmpty() && QFileInfo::exists(backendScript) &&
+        !m_settings.ttsModelPath.isEmpty() && QFileInfo::exists(m_settings.ttsModelPath);
+    if (!canRunBackend)
+        return;
+
+    QString backendError;
+    if (!ensureTtsBackendProcess(pythonExe, backendScript, m_settings.ttsModelPath, modelMode, &backendError)
+        && !backendError.isEmpty())
+    {
+        reportDebugEvent("A",
+                         "OfflineVoiceService::warmTtsBackendIfNeeded/error",
+                         QStringLiteral("[DEBUG] Failed to prewarm Qwen3-TTS backend"),
+                         QJsonObject{
+                             {QStringLiteral("detail"), clampForLog(backendError)}
+                         });
+    }
+}
+
 void OfflineVoiceService::startTts(const QString& text)
 {
     stopTts();
-    
-    QString programGen = m_settings.kwsModelPath + QStringLiteral("/sherpa-onnx-offline-tts");
-    QString programPlay = m_settings.kwsModelPath + QStringLiteral("/sherpa-onnx-offline-tts-play");
-#if defined(Q_OS_WIN32)
-    if (!programGen.endsWith(QStringLiteral(".exe")))
-        programGen += QStringLiteral(".exe");
-    if (!programPlay.endsWith(QStringLiteral(".exe")))
-        programPlay += QStringLiteral(".exe");
-#endif
-    
-    if (!QFileInfo::exists(programGen)) {
-        programGen = exePath(QStringLiteral("sherpa-onnx-offline-tts"));
-    }
-    if (!QFileInfo::exists(programPlay)) {
-        programPlay = exePath(QStringLiteral("sherpa-onnx-offline-tts-play"));
-    }
-    
-    bool canGen = !programGen.isEmpty() && QFileInfo::exists(programGen);
-    bool canPlay = !programPlay.isEmpty() && QFileInfo::exists(programPlay);
-    QString program = canPlay ? programPlay : programGen;
-    
-    if (!canGen && !canPlay) {
+
+    if (text.trimmed().isEmpty())
+        return;
+
+    const QString pythonExe = qwenTtsPythonExecutable();
+    const QString backendScript = qwenTtsBackendScriptPath(m_settings.ttsModelPath);
+    const QString modelMode = detectQwenTtsModelMode(m_settings.ttsModelPath);
+    const QString defaultPromptAudio = qwenTtsDefaultPromptAudioPath(m_settings.ttsModelPath);
+    const QString defaultPromptText = qwenTtsDefaultPromptTextPath(m_settings.ttsModelPath);
+    const bool canRunBackend =
+        !pythonExe.isEmpty() && QFileInfo::exists(pythonExe) &&
+        !backendScript.isEmpty() && QFileInfo::exists(backendScript) &&
+        !m_settings.ttsModelPath.isEmpty() && QFileInfo::exists(m_settings.ttsModelPath);
+
+    // #region debug-point A:tts-program-selection
+    reportDebugEvent("A",
+                     "OfflineVoiceService::startTts/select",
+                     QStringLiteral("[DEBUG] Selected Qwen3-TTS backend"),
+                     QJsonObject{
+                         {QStringLiteral("pythonExecutable"), pythonExe},
+                         {QStringLiteral("backendScript"), backendScript},
+                         {QStringLiteral("canRunBackend"), canRunBackend},
+                         {QStringLiteral("modelMode"), modelMode},
+                         {QStringLiteral("defaultPromptAudio"), defaultPromptAudio},
+                         {QStringLiteral("defaultPromptText"), defaultPromptText},
+                         {QStringLiteral("textLength"), text.size()},
+                         {QStringLiteral("ttsModelPath"), m_settings.ttsModelPath},
+                         {QStringLiteral("ttsModelPathExists"), QFileInfo::exists(m_settings.ttsModelPath)}
+                     });
+    // #endregion
+
+    if (!canRunBackend) {
+        QStringList missing;
+        if (pythonExe.isEmpty() || !QFileInfo::exists(pythonExe))
+            missing << QStringLiteral("Python");
+        if (backendScript.isEmpty() || !QFileInfo::exists(backendScript))
+            missing << QStringLiteral("backend script");
+        if (m_settings.ttsModelPath.isEmpty() || !QFileInfo::exists(m_settings.ttsModelPath))
+            missing << QStringLiteral("Qwen3-TTS model directory");
+        showTtsHint(QObject::tr("无法启动 Qwen3-TTS 本地后端，缺少：%1").arg(missing.join(QStringLiteral(", "))));
         return;
     }
-    
-    QString wavPath;
-    bool useWavGen = (program == programGen);
-    if (useWavGen) {
-        QDir cache(SettingsManager::instance().cacheDir());
-        if (!cache.exists()) cache.mkpath(QStringLiteral("."));
-        wavPath = cache.filePath(QStringLiteral("tts_%1.wav").arg(QDateTime::currentMSecsSinceEpoch()));
-        m_ttsWavPath = wavPath;
-    }
-    
-    QString args = QStringLiteral("--encoder-model=\"%1/model.safetensors\" --decoder-model=\"%1/model.safetensors\" --speech-tokenizer-dir=\"%1/speech_tokenizer\"").arg(m_settings.ttsModelPath);
-    
-    if (useWavGen && !args.contains(QStringLiteral("--output-filename"))) {
-        QString outArg = QStringLiteral("--output-filename=\"%1\"").arg(wavPath);
-        args = outArg + QStringLiteral(" ") + args;
-    }
-    
-    QString escaped = text;
-    escaped.replace('"', QStringLiteral("\\\""));
-    QString quoted = QStringLiteral("\"") + escaped + QStringLiteral("\"");
-    args = args + QStringLiteral(" ") + quoted;
-    
-    m_tts = new QProcess(this);
-    m_tts->setProgram(program);
-    m_tts->setArguments(splitArgs(args));
-    
-    connect(m_tts, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-        if (!m_tts) return;
-        QString out = QString::fromLocal8Bit(m_tts->readAll());
-        showSpeakerHint(m_tts->errorString() + QStringLiteral("\n") + out);
-    });
-    
-    const int ttsVolPercent = m_settings.ttsVolumePercent;
-    connect(m_tts, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), 
-            this, [this, wavPath, ttsVolPercent](int exitCode, QProcess::ExitStatus) {
-        if (!m_tts) return;
-        QString out = QString::fromLocal8Bit(m_tts->readAll());
-        if (exitCode != 0) {
-            showSpeakerHint(out);
+
+    pauseCaptureForTts();
+
+    QDir cache(SettingsManager::instance().cacheDir());
+    if (!cache.exists()) cache.mkpath(QStringLiteral("."));
+    const QString wavPath = cache.filePath(QStringLiteral("tts_%1.wav").arg(QDateTime::currentMSecsSinceEpoch()));
+    m_ttsWavPath = wavPath;
+    QJsonObject request{
+        {QStringLiteral("id"), ++m_ttsRequestCounter},
+        {QStringLiteral("command"), QStringLiteral("synthesize")},
+        {QStringLiteral("output_file"), wavPath},
+        {QStringLiteral("text"), text},
+        {QStringLiteral("language"), QStringLiteral("Chinese")},
+        {QStringLiteral("mode"), modelMode},
+        {QStringLiteral("max_new_tokens"), 512}
+    };
+    m_activeTtsRequestId = m_ttsRequestCounter;
+
+    if (modelMode == QStringLiteral("base")) {
+        if (defaultPromptAudio.isEmpty()) {
+            showTtsHint(QObject::tr(
+                "当前 Qwen3-TTS Base 模型缺少默认参考音频。\n\n"
+                "请检查 `res/voice_deps/qwen3-tts/prompt/default_reference.mp3` 是否存在。"));
+            resumeCaptureAfterTtsIfNeeded();
+            return;
         }
-        m_tts->deleteLater();
-        m_tts = nullptr;
-        
-        if (exitCode == 0 && !wavPath.isEmpty() && QFileInfo::exists(wavPath)) {
-            if (m_ttsAudio) {
-                delete m_ttsAudio;
-                m_ttsAudio = nullptr;
-            }
-            
-            m_ttsAudio = new QAudioOutput(this);
-            m_ttsAudio->setVolume(qBound(0.0, double(ttsVolPercent) / 100.0, 1.0));
-            
-            if (!m_ttsPlayer) {
-                m_ttsPlayer = new QMediaPlayer(this);
-            } else {
-                m_ttsPlayer->stop();
-            }
-            
-            m_ttsPlayer->setAudioOutput(m_ttsAudio);
-            m_ttsPlayer->setSource(QUrl::fromLocalFile(wavPath));
-            
-            connect(m_ttsPlayer, &QMediaPlayer::errorOccurred, this, 
-                    [this](QMediaPlayer::Error, const QString &errorString) {
-                qWarning() << "TTS playback error:" << errorString;
-            }, Qt::SingleShotConnection);
-            
-            m_ttsPlayer->play();
-        }
-    });
-    
-    m_tts->start();
-    
-#if defined(Q_OS_WIN32)
-    if (program == programPlay) {
-        float vol01 = qBound(0.0f, float(m_settings.ttsVolumePercent) / 100.0f, 1.0f);
-        auto tries = std::make_shared<int>(0);
-        auto loop = std::make_shared<std::function<void()>>();
-        *loop = [this, vol01, tries, loop]{
-            if (!m_tts) return;
-            qint64 pid64 = m_tts->processId();
-            if (pid64 <= 0) return;
-            if (++*tries >= 20) return;
-            QTimer::singleShot(120, this, *loop);
-        };
-        QTimer::singleShot(60, this, *loop);
+        request.insert(QStringLiteral("ref_audio"), defaultPromptAudio);
+        request.insert(QStringLiteral("x_vector_only"), true);
+        if (!defaultPromptText.isEmpty())
+            request.insert(QStringLiteral("ref_text"), defaultPromptText);
     }
-#endif
+
+    QString backendError;
+    if (!ensureTtsBackendProcess(pythonExe, backendScript, m_settings.ttsModelPath, modelMode, &backendError)) {
+        showTtsHint(backendError);
+        resumeCaptureAfterTtsIfNeeded();
+        return;
+    }
+
+    m_ttsRequestActive = true;
+    const QByteArray payload = QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n';
+    if (m_tts->write(payload) < 0) {
+        m_ttsRequestActive = false;
+        showTtsHint(m_tts->errorString());
+        resumeCaptureAfterTtsIfNeeded();
+        return;
+    }
+    m_tts->waitForBytesWritten(1000);
+    reportDebugEvent("B",
+                     "OfflineVoiceService::startTts/request-sent",
+                     QStringLiteral("[DEBUG] Sent TTS request to warm backend"),
+                     QJsonObject{
+                         {QStringLiteral("requestId"), QString::number(m_activeTtsRequestId)},
+                         {QStringLiteral("wavPath"), wavPath},
+                         {QStringLiteral("textLength"), text.size()},
+                         {QStringLiteral("modelMode"), modelMode}
+                     });
 }
 
 void OfflineVoiceService::stopTts()
 {
-    if (m_tts) {
-        m_tts->kill();
-        m_tts->deleteLater();
-        m_tts = nullptr;
-    }
+    m_ttsRequestActive = false;
+    m_activeTtsRequestId = ++m_ttsRequestCounter;
     if (m_ttsPlayer) {
         m_ttsPlayer->stop();
     }
@@ -768,4 +1546,16 @@ void OfflineVoiceService::stopTts()
         QFile::remove(m_ttsWavPath);
         m_ttsWavPath.clear();
     }
+    resumeCaptureAfterTtsIfNeeded();
+}
+
+void OfflineVoiceService::stopTtsBackend()
+{
+    if (m_tts) {
+        m_tts->kill();
+        m_tts->deleteLater();
+        m_tts = nullptr;
+    }
+    m_ttsBackendSignature.clear();
+    m_ttsBackendStdoutBuffer.clear();
 }

@@ -60,6 +60,12 @@ private:
     void initAudioDevices();
     void startMicIfNeeded();
     void stopMic();
+    bool ensureTtsAudioOutput(int ttsVolumePercent, QString* errorDetail = nullptr);
+    bool shouldCaptureMic() const;
+    void resetListeningState();
+    void syncCaptureState();
+    void pauseCaptureForTts();
+    void resumeCaptureAfterTtsIfNeeded();
 
     void processAudioBuffer(const QByteArray& data);
     void processKWS(const float* samples, size_t count);
@@ -68,6 +74,14 @@ private:
 
     void startTts(const QString& text);
     void stopTts();
+    void stopTtsBackend();
+    bool ensureTtsBackendProcess(const QString& pythonExe,
+                                 const QString& backendScript,
+                                 const QString& modelDir,
+                                 const QString& modelMode,
+                                 QString* errorDetail = nullptr);
+    void handleTtsBackendStdout();
+    void warmTtsBackendIfNeeded();
 
 private:
     SettingsSnapshot m_settings;
@@ -81,6 +95,13 @@ private:
     QMediaPlayer* m_ttsPlayer{nullptr};
     QMediaDevices* m_mediaDevices{nullptr};
     QString m_ttsWavPath;
+    QString m_ttsBackendSignature;
+    QByteArray m_ttsBackendStdoutBuffer;
+    bool m_resumeCaptureAfterTts{false};
+    bool m_mediaDeviceSignalsConnected{false};
+    qint64 m_ttsRequestCounter{0};
+    qint64 m_activeTtsRequestId{0};
+    bool m_ttsRequestActive{false};
 
     std::vector<float> m_audioBuffer;
     std::vector<float> m_resampledBuffer;

@@ -41,6 +41,8 @@ signals:
     void requestOpenChat();
     void llmStyleChanged(const QString& style);
     void llmModelSizeChanged(const QString& size);
+    void chatInteractionModeChanged(const QString& mode);
+    void quickInputStyleChanged(const QString& style);
     void offlineVoiceSettingsChanged();
 
     // i18n

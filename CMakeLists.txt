@@ -289,7 +289,7 @@ if(WIN32 AND NOT Qt6_DIR)
     endif()
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets Svg Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets Svg Multimedia Network)
 
 if(MSVC AND (Qt6_DIR MATCHES "mingw" OR Qt6Core_DIR MATCHES "mingw"))
     message(FATAL_ERROR
@@ -468,6 +468,8 @@ set(UI_SOURCES
     src/ui/SettingsWindow.cpp
     src/ui/ChatWindow.hpp
     src/ui/ChatWindow.cpp
+    src/ui/QuickInputWindow.hpp
+    src/ui/QuickInputWindow.cpp
 )
 
 if(APPLE)
@@ -574,6 +576,7 @@ target_link_libraries(XiaoMo PRIVATE
     Qt6::OpenGL
     Qt6::OpenGLWidgets
     Qt6::Svg
+    Qt6::Network
 )
 
 if(NOT AMAIGIRL_USE_MINGW)

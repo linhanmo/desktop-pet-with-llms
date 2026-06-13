@@ -434,6 +434,9 @@ void ChatController::reservedUpdateLipSync(const QString& audioPath)
 
 void ChatController::onModelChanged(const QString& modelFolder, const QString& modelDir)
 {
+    m_modelFolder = modelFolder.trimmed().isEmpty()
+        ? QStringLiteral("__global__")
+        : modelFolder.trimmed();
     m_modelDir = modelDir;
     if (m_chatWindow)
     {

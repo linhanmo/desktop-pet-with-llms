@@ -24,6 +24,7 @@
 #include "ui/SettingsWindow.hpp"
 #include "ai/ChatController.hpp"
 #include "ui/ChatWindow.hpp"
+#include "ui/QuickInputWindow.hpp"
 #include "ui/theme/ThemeApi.hpp"
 #include "common/Utils.hpp"
 #include "audio/OfflineVoiceService.hpp"
@@ -38,6 +39,7 @@
 #include <QDateTime>
 #include <QTime>
 #include <QHash>
+#include <QRegularExpression>
 #include <QTextDocument>
 #include <QAbstractTextDocumentLayout>
 #include <QTextOption>
@@ -108,6 +110,46 @@ QString formatExceptionMessage(const std::exception& e)
 {
     const QString w = QString::fromLocal8Bit(e.what());
     return w.isEmpty() ? QObject::tr("未知错误") : w;
+}
+
+QString normalizeVoiceTranscript(QString text)
+{
+    text.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    const QRegularExpression labelPrefix(
+        QStringLiteral(R"(^(?:text|result|recognized|recognition|transcript|sentence)\s*[:：]\s*)"),
+        QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpression edgeQuotes(QStringLiteral(R"(^[\s"'`]+|[\s"'`]+$)"));
+
+    QString chosen;
+    const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (QString line : lines)
+    {
+        line = line.trimmed();
+        if (line.isEmpty())
+            continue;
+        line.remove(labelPrefix);
+        line.remove(edgeQuotes);
+        line = line.simplified();
+        if (line.isEmpty())
+            continue;
+        if (line.compare(QStringLiteral("<blank>"), Qt::CaseInsensitive) == 0)
+            continue;
+        chosen = line;
+    }
+
+    if (chosen.isEmpty())
+    {
+        chosen = text.trimmed();
+        chosen.remove(edgeQuotes);
+        chosen = chosen.simplified();
+    }
+
+    return chosen;
+}
+
+bool usesHistoryConversationUi()
+{
+    return SettingsManager::instance().chatInteractionMode() == QStringLiteral("history");
 }
 
 void showModelLoadError(const QString& modelPath, const QString& detail)
@@ -1086,6 +1128,11 @@ int main(int argc, char *argv[]) {
     // Chat window + controller
     auto chatWnd = new ChatWindow(&win);
     chatWnd->hide();
+    auto quickInputWnd = new QuickInputWindow(&win);
+    quickInputWnd->setPresentationStyle(SettingsManager::instance().quickInputStyle());
+    quickInputWnd->setLlmStyle(SettingsManager::instance().llmStyle());
+    quickInputWnd->setLlmModelSize(SettingsManager::instance().llmModelSize());
+    quickInputWnd->hide();
     auto chatCtl = new ChatController(&app);
     chatCtl->setChatWindow(chatWnd);
     chatCtl->setRenderer(renderer);
@@ -1143,7 +1190,32 @@ int main(int argc, char *argv[]) {
         bubbleWnd->raise();
     };
 
-    QObject::connect(chatCtl, &ChatController::assistantBubbleTextChanged, &app, [bubbleWnd, bubbleHideTimer, placeBubble, condenseForBubble](const QString& text, bool isFinal){
+    auto showVoiceHintBubble = [bubbleWnd, bubbleHideTimer, placeBubble, condenseForBubble](const QString& text, int timeoutMs = 2500){
+        if (usesHistoryConversationUi()) {
+            bubbleHideTimer->stop();
+            bubbleWnd->hide();
+            return;
+        }
+        const QString t = condenseForBubble(text);
+        if (t.isEmpty())
+            return;
+        bubbleHideTimer->stop();
+        bubbleWnd->setBubbleStyle(SettingsManager::instance().chatBubbleStyle());
+        bubbleWnd->setBubbleText(t);
+        bubbleWnd->show();
+        placeBubble();
+        if (timeoutMs > 0)
+            bubbleHideTimer->start(timeoutMs);
+    };
+
+    QObject::connect(chatCtl, &ChatController::assistantBubbleTextChanged, &app, [bubbleWnd, bubbleHideTimer, placeBubble, condenseForBubble, quickInputWnd](const QString& text, bool isFinal){
+        if (quickInputWnd && isFinal)
+            quickInputWnd->setBusy(false);
+        if (usesHistoryConversationUi()) {
+            bubbleHideTimer->stop();
+            bubbleWnd->hide();
+            return;
+        }
         const QString t = condenseForBubble(text);
         if (t.isEmpty()) {
             bubbleHideTimer->stop();
@@ -1304,38 +1376,233 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    auto toggleChat = [chatWnd]{
+    auto showChat = [chatWnd]{
         static bool s_firstShow = true;
+        if (chatWnd->isVisible()) {
+            bringToFrontOnce(chatWnd);
+            chatWnd->focusComposer();
+            return;
+        }
+        if (s_firstShow) {
+            // 首次显示时强制居中。之后不再改位置，避免每次 show() 被平台重新“自动摆放”导致漂移。
+            centerOnCurrentScreen(chatWnd);
+            s_firstShow = false;
+        }
+#if defined(Q_OS_LINUX)
+        restoreWindowGeometry(chatWnd);
+#endif
+        bringToFrontOnce(chatWnd);
+#if defined(Q_OS_LINUX)
+        QTimer::singleShot(0, chatWnd, [chatWnd]{ restoreWindowGeometry(chatWnd); });
+        cacheWindowGeometry(chatWnd);
+#endif
+        chatWnd->focusComposer();
+    };
+
+    auto toggleChatWindow = [chatWnd, showChat]{
         if (chatWnd->isVisible()) {
 #if defined(Q_OS_LINUX)
             cacheWindowGeometry(chatWnd);
 #endif
             chatWnd->hide();
-        } else {
-            if (s_firstShow) {
-                // 首次显示时强制居中。之后不再改位置，避免每次 show() 被平台重新“自动摆放”导致漂移。
-                centerOnCurrentScreen(chatWnd);
-                s_firstShow = false;
-            }
+            return;
+        }
+        showChat();
+    };
+
+    auto showQuickInput = [quickInputWnd]{
+        static bool s_firstShow = true;
+        if (quickInputWnd->isVisible()) {
+            bringToFrontOnce(quickInputWnd);
+            quickInputWnd->focusComposer();
+            return;
+        }
+        if (s_firstShow) {
+            centerOnCurrentScreen(quickInputWnd);
+            s_firstShow = false;
+        }
 #if defined(Q_OS_LINUX)
-            restoreWindowGeometry(chatWnd);
+        restoreWindowGeometry(quickInputWnd);
 #endif
-            bringToFrontOnce(chatWnd);
+        bringToFrontOnce(quickInputWnd);
 #if defined(Q_OS_LINUX)
-            QTimer::singleShot(0, chatWnd, [chatWnd]{ restoreWindowGeometry(chatWnd); });
+        QTimer::singleShot(0, quickInputWnd, [quickInputWnd]{ restoreWindowGeometry(quickInputWnd); });
+        cacheWindowGeometry(quickInputWnd);
+#endif
+        quickInputWnd->focusComposer();
+    };
+
+    auto toggleQuickInputWindow = [quickInputWnd, showQuickInput]{
+        if (quickInputWnd->isVisible()) {
+#if defined(Q_OS_LINUX)
+            cacheWindowGeometry(quickInputWnd);
+#endif
+            quickInputWnd->hide();
+            return;
+        }
+        showQuickInput();
+    };
+
+    auto hideConversationWindows = [chatWnd, quickInputWnd]{
+        if (chatWnd->isVisible()) {
+#if defined(Q_OS_LINUX)
             cacheWindowGeometry(chatWnd);
 #endif
+            chatWnd->hide();
+        }
+        if (quickInputWnd->isVisible()) {
+#if defined(Q_OS_LINUX)
+            cacheWindowGeometry(quickInputWnd);
+#endif
+            quickInputWnd->hide();
         }
     };
+
+    auto showConversationUi = [showChat, showQuickInput]{
+        if (usesHistoryConversationUi())
+            showChat();
+        else
+            showQuickInput();
+    };
+
+    auto toggleConversationUi = [toggleChatWindow, toggleQuickInputWindow]{
+        if (usesHistoryConversationUi())
+            toggleChatWindow();
+        else
+            toggleQuickInputWindow();
+    };
+
+    auto switchConversationMode = [chatWnd, quickInputWnd, showChat, showQuickInput](const QString& mode){
+        const QString normalized = mode.trimmed().toLower() == QStringLiteral("history")
+            ? QStringLiteral("history")
+            : QStringLiteral("quick");
+        SettingsManager::instance().setChatInteractionMode(normalized);
+        if (chatWnd->isVisible())
+            chatWnd->hide();
+        if (quickInputWnd->isVisible())
+            quickInputWnd->hide();
+        if (normalized == QStringLiteral("history"))
+            showChat();
+        else
+            showQuickInput();
+    };
+
+    QObject::connect(quickInputWnd, &QuickInputWindow::requestSendText, &app, [chatCtl](const QString& text){
+        chatCtl->triggerLocalPrompt(text, QString(), QString());
+    });
+    QObject::connect(quickInputWnd, &QuickInputWindow::requestLlmStyleChanged, chatCtl, [chatCtl](const QString& s){
+        chatCtl->setLlmStyle(s);
+    });
+    QObject::connect(quickInputWnd, &QuickInputWindow::requestLlmModelSizeChanged, chatCtl, [chatCtl](const QString& size){
+        chatCtl->setLlmModelSize(size);
+    });
+    QObject::connect(quickInputWnd, &QuickInputWindow::requestSwitchToHistoryMode, &app, [switchConversationMode]{
+        switchConversationMode(QStringLiteral("history"));
+    });
+    QObject::connect(chatWnd, &ChatWindow::requestSwitchToQuickInputMode, &app, [switchConversationMode]{
+        switchConversationMode(QStringLiteral("quick"));
+    });
+    QObject::connect(settingsWnd, &SettingsWindow::chatInteractionModeChanged, &app,
+                     [hideConversationWindows, bubbleWnd, bubbleHideTimer](const QString&){
+        hideConversationWindows();
+        bubbleHideTimer->stop();
+        if (bubbleWnd)
+            bubbleWnd->hide();
+    });
+    QObject::connect(settingsWnd, &SettingsWindow::quickInputStyleChanged, quickInputWnd,
+                     [quickInputWnd](const QString& style){
+        quickInputWnd->setPresentationStyle(style);
+    });
+    QObject::connect(settingsWnd, &SettingsWindow::llmStyleChanged, quickInputWnd,
+                     [quickInputWnd](const QString& style){
+        quickInputWnd->setLlmStyle(style);
+    });
+    QObject::connect(settingsWnd, &SettingsWindow::llmModelSizeChanged, quickInputWnd,
+                     [quickInputWnd](const QString& size){
+        quickInputWnd->setLlmModelSize(size);
+    });
+
+    QString lastVoiceTranscript;
+    QDateTime lastVoiceTranscriptAt;
+    QObject::connect(voiceSvc, &OfflineVoiceService::wakeWordDetected, &app, [showVoiceHintBubble, showConversationUi, chatWnd, quickInputWnd]{
+        if (chatWnd)
+            chatWnd->clearComposerText();
+        if (quickInputWnd)
+            quickInputWnd->clearDraftText();
+        if (SettingsManager::instance().sttEnabled()) {
+            showVoiceHintBubble(QObject::tr("我在，请说。"), 2200);
+            showConversationUi();
+            return;
+        }
+        showVoiceHintBubble(QObject::tr("已唤醒，可开始输入。"), 2600);
+        showConversationUi();
+    });
+    QObject::connect(voiceSvc, &OfflineVoiceService::sttPartialResult, &app,
+                     [showVoiceHintBubble, showConversationUi, chatWnd, quickInputWnd](const QString& rawText){
+        const QString text = normalizeVoiceTranscript(rawText);
+        if (text.isEmpty()) {
+            if (chatWnd)
+                chatWnd->clearComposerText();
+            if (quickInputWnd)
+                quickInputWnd->clearDraftText();
+            return;
+        }
+
+        showConversationUi();
+        if (usesHistoryConversationUi()) {
+            if (chatWnd) {
+                chatWnd->setComposerText(text);
+                chatWnd->focusComposer();
+            }
+            return;
+        }
+
+        if (quickInputWnd) {
+            quickInputWnd->setDraftText(text);
+            quickInputWnd->focusComposer();
+        }
+        showVoiceHintBubble(text, 0);
+    });
+    QObject::connect(voiceSvc, &OfflineVoiceService::sttResult, &app,
+                     [chatCtl, showVoiceHintBubble, showConversationUi, chatWnd, quickInputWnd, &lastVoiceTranscript, &lastVoiceTranscriptAt](const QString& rawText){
+        const QString text = normalizeVoiceTranscript(rawText);
+        if (text.isEmpty()) {
+            if (chatWnd)
+                chatWnd->clearComposerText();
+            if (quickInputWnd)
+                quickInputWnd->clearDraftText();
+            showVoiceHintBubble(QObject::tr("没有听清，请再说一次。"), 2200);
+            return;
+        }
+
+        const QDateTime now = QDateTime::currentDateTime();
+        if (lastVoiceTranscript == text
+            && lastVoiceTranscriptAt.isValid()
+            && lastVoiceTranscriptAt.msecsTo(now) <= 2000)
+        {
+            return;
+        }
+
+        lastVoiceTranscript = text;
+        lastVoiceTranscriptAt = now;
+        showConversationUi();
+        if (chatWnd)
+            chatWnd->clearComposerText();
+        if (quickInputWnd)
+            quickInputWnd->clearDraftText();
+        if (quickInputWnd)
+            quickInputWnd->setBusy(true);
+        chatCtl->triggerLocalPrompt(text, QString(), QString());
+    });
 
     // Global shortcut for toggling chat window visibility (works even when main window is hidden)
     auto* chatShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_T), &win);
     chatShortcut->setContext(Qt::ApplicationShortcut);
-    QObject::connect(chatShortcut, &QShortcut::activated, &app, [toggleChat]{ toggleChat(); });
+    QObject::connect(chatShortcut, &QShortcut::activated, &app, [toggleConversationUi]{ toggleConversationUi(); });
 
-    QObject::connect(chatAction, &QAction::triggered, &app, [toggleChat]{ toggleChat(); });
+    QObject::connect(chatAction, &QAction::triggered, &app, [toggleConversationUi]{ toggleConversationUi(); });
 
-    QObject::connect(settingsWnd, &SettingsWindow::requestOpenChat, &app, [toggleChat]{ toggleChat(); });
+    QObject::connect(settingsWnd, &SettingsWindow::requestOpenChat, &app, [toggleConversationUi]{ toggleConversationUi(); });
 
     // --- Add shortcuts like "聊天" ---
     auto* toggleShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_H), &win);

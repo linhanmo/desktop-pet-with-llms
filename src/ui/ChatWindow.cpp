@@ -24,6 +24,7 @@
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QTextOption>
+#include <QToolButton>
 #include <QUrl>
 
 #include "ui/theme/ThemeApi.hpp"
@@ -438,6 +439,7 @@ public:
     ThemeWidgets::ComboBox* styleCombo{nullptr};
     ThemeWidgets::ComboBox* modelSizeCombo{nullptr};
     QLabel* countLabel{nullptr};
+    QToolButton* switchModeBtn{nullptr};
 
     QPixmap userAvatar;
     QPixmap aiAvatar;
@@ -777,9 +779,16 @@ ChatWindow::ChatWindow(QWidget* parent)
     d->countLabel->setFixedSize(kComposerSendButtonSize, kComposerFooterControlSize);
     d->countLabel->setContentsMargins(0, 5, 0, 0);
 
+    d->switchModeBtn = new QToolButton(d->composerCard);
+    d->switchModeBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    d->switchModeBtn->setText(tr("切换到单输入框"));
+    d->switchModeBtn->setAutoRaise(true);
+    d->switchModeBtn->setCursor(Qt::PointingHandCursor);
+
     footerRow->addWidget(d->clearBtn, 0, Qt::AlignLeft | Qt::AlignVCenter);
     footerRow->addWidget(d->styleCombo, 0, Qt::AlignLeft | Qt::AlignVCenter);
     footerRow->addWidget(d->modelSizeCombo, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    footerRow->addWidget(d->switchModeBtn, 0, Qt::AlignLeft | Qt::AlignVCenter);
     footerRow->addStretch(1);
     footerRow->addWidget(d->countLabel, 0, Qt::AlignRight | Qt::AlignVCenter);
     composerLayout->addLayout(footerRow);
@@ -843,6 +852,9 @@ ChatWindow::ChatWindow(QWidget* parent)
     });
     connect(d->modelSizeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int){
         emit requestLlmModelSizeChanged(d->modelSizeCombo->currentData().toString());
+    });
+    connect(d->switchModeBtn, &QToolButton::clicked, this, [this]{
+        emit requestSwitchToQuickInputMode();
     });
 
     // Responsive relayout on resize
@@ -922,6 +934,31 @@ void ChatWindow::setLlmModelSize(const QString& size)
     if (d->modelSizeCombo->currentIndex() == idx) return;
     QSignalBlocker b(d->modelSizeCombo);
     d->modelSizeCombo->setCurrentIndex(idx);
+}
+
+void ChatWindow::setComposerText(const QString& text)
+{
+    if (!d || !d->input)
+        return;
+
+    const QSignalBlocker blocker(d->input);
+    d->input->setPlainText(text);
+    d->input->moveCursor(QTextCursor::End);
+    d->updateInputMetrics();
+    d->updateInputCount();
+}
+
+void ChatWindow::clearComposerText()
+{
+    setComposerText(QString());
+}
+
+void ChatWindow::focusComposer()
+{
+    if (!d || !d->input)
+        return;
+    d->input->setFocus(Qt::OtherFocusReason);
+    d->input->moveCursor(QTextCursor::End);
 }
 
 void ChatWindow::appendUserMessage(const QString& text)
@@ -1081,6 +1118,7 @@ bool ChatWindow::event(QEvent* e)
             if (d->input) d->input->setPlaceholderText(tr("输入消息... (Enter 发送 / Shift+Enter 换行)"));
             if (d->sendBtn) d->sendBtn->setToolTip(tr("发送"));
             if (d->clearBtn) d->clearBtn->setToolTip(tr("清除"));
+            if (d->switchModeBtn) d->switchModeBtn->setText(tr("切换到单输入框"));
         }
     }
 

@@ -31,11 +31,15 @@ Q_SIGNALS:
     void requestClearChat(const QString& modelFolder);
     void requestLlmStyleChanged(const QString& style);
     void requestLlmModelSizeChanged(const QString& size);
+    void requestSwitchToQuickInputMode();
 
 public Q_SLOTS:
     void setBusy(bool busy);
     void setLlmStyle(const QString& style);
     void setLlmModelSize(const QString& size);
+    void setComposerText(const QString& text);
+    void clearComposerText();
+    void focusComposer();
     void appendUserMessage(const QString& text);
     void appendAiMessageStart();
     void appendAiToken(const QString& token);

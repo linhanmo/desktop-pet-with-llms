@@ -89,12 +89,20 @@ public:
     void setLlmStyle(const QString& style);
     QString llmModelSize() const;
     void setLlmModelSize(const QString& size);
+    QString chatInteractionMode() const;
+    void setChatInteractionMode(const QString& mode);
+    QString quickInputStyle() const;
+    void setQuickInputStyle(const QString& style);
     QString chatBubbleStyle() const;
     void setChatBubbleStyle(const QString& styleId);
 
     // ---- Offline voice (Sherpa-onnx, stored in global config.json) ----
     bool offlineTtsEnabled() const;
     void setOfflineTtsEnabled(bool v);
+    bool kwsEnabled() const;
+    void setKwsEnabled(bool v);
+    bool sttEnabled() const;
+    void setSttEnabled(bool v);
     QString sherpaOnnxBinDir() const;
     void setSherpaOnnxBinDir(const QString& dir);
     QString sherpaTtsModel() const;
@@ -159,10 +167,14 @@ private:
     QString m_aiSystemPrompt{"你是桌面宠物$name$，请用简短、友好的中文回复用户。"};
     QString m_llmStyle{QStringLiteral("Original")};
     QString m_llmModelSize{QStringLiteral("1.5B")};
+    QString m_chatInteractionMode{QStringLiteral("quick")};
+    QString m_quickInputStyle{QStringLiteral("floating")};
     QString m_chatBubbleStyle{QStringLiteral("Era")};
 
     // Offline voice
     bool m_offlineTtsEnabled{false};
+    bool m_kwsEnabled{false};
+    bool m_sttEnabled{false};
     QString m_sherpaOnnxBinDir;
     QString m_sherpaTtsModel;
     QString m_sherpaTtsArgs;
